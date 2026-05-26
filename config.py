@@ -84,16 +84,17 @@ SIGNUPS_CHANNEL_ID         = int(os.getenv("SIGNUPS_CHANNEL_ID",         0))
 # ─────────────────────────────────────────────
 #  SIGNUP SCHEDULE
 # ─────────────────────────────────────────────
-SIGNUP_WEEKDAY = 6    # 0 = Monday … 6 = Sunday  (day the poll is auto-posted)
-SIGNUP_HOUR    = 23    # 24-hour format
+SIGNUP_WEEKDAY = 0    # 0 = Monday … 6 = Sunday  (day the poll is auto-posted)
+SIGNUP_HOUR    = 9    # 24-hour format
 
 # Each entry is one poll option. weekday: 0=Mon … 6=Sun. time: display string.
 # The bot calculates the actual date of the next occurrence from the post date.
 MEETING_DAYS: list[dict] = [
-    {"weekday": 5, "time": "10:00 AM - 12:00 PM"},  # Saturday
+    {"weekday": 0, "time": "7:00 AM - 9:00 PM"},  # Monday
+	{"weekday": 3, "time": "7:00 PM - 9:00 PM"},  # Thursday
 ]
 
-POLL_DURATION_HOURS = 72   # how long the poll stays open
+POLL_DURATION_HOURS = 168   # how long the poll stays open
 
 # ─────────────────────────────────────────────
 #  REQUEST NOTIFICATIONS
