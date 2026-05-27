@@ -18,6 +18,7 @@ async def _temp_followup(interaction: discord.Interaction, content: str) -> None
     asyncio.create_task(_delete())
 
 from utils.gcal import get_upcoming_events, build_calendar_text
+from utils.permissions import captain_only
 
 MSG_ID_FILE = "calendar_msg_id.txt"
 
@@ -88,11 +89,16 @@ class CalendarPanel(commands.Cog):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="refresh_calendar", description="Force-refresh the calendar panel")
-    @app_commands.checks.has_permissions(manage_messages=True)
+    @captain_only()
     async def force_refresh(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         await self._refresh()
         await _temp_followup(interaction, "Calendar refreshed!")
+
+    @force_refresh.error
+    async def force_refresh_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        if isinstance(error, app_commands.CheckFailure):
+            await interaction.response.send_message("This command is for captains and mentors only.", ephemeral=True)
 
 
 async def setup(bot: commands.Bot):

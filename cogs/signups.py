@@ -12,6 +12,7 @@ from config import (
     MEETING_DAYS,
     POLL_DURATION_HOURS,
 )
+from utils.permissions import captain_only
 
 _WEEKDAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
@@ -89,11 +90,16 @@ class Signups(commands.Cog):
         await self.bot.wait_until_ready()
 
     @app_commands.command(name="post_signup", description="Manually post this week's attendance poll")
-    @app_commands.checks.has_permissions(manage_messages=True)
+    @captain_only()
     async def manual_post(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         await self._do_post()
         await _temp_followup(interaction, "Poll posted!")
+
+    @manual_post.error
+    async def manual_post_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        if isinstance(error, app_commands.CheckFailure):
+            await interaction.response.send_message("This command is for captains and mentors only.", ephemeral=True)
 
 
 async def setup(bot: commands.Bot):

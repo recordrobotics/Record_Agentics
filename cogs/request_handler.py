@@ -98,13 +98,18 @@ class RequestHandler(commands.Cog):
             return
 
         payload = req.get("payload", {})
+        editor   = req.get("requester_name", "")
+        approver = interaction.user.display_name
         try:
             if req["action"] == "agenda_add":
-                add_agenda_task(payload["text"], req["division"])
+                add_agenda_task(payload["text"], req["division"],
+                                editor=editor, approver=approver)
             elif req["action"] == "agenda_toggle":
-                toggle_agenda_task(payload["task_name"], req["division"], payload["done"])
+                toggle_agenda_task(payload["task_name"], req["division"], payload["done"],
+                                   editor=editor, approver=approver)
             elif req["action"] == "achievement_add":
-                add_achievement(payload["text"], req["division"])
+                add_achievement(payload["text"], req["division"],
+                                editor=editor, approver=approver)
         except Exception as e:
             await interaction.followup.send(f"Failed to apply change: {e}")
             return

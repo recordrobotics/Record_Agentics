@@ -61,12 +61,13 @@ def get_agenda_tasks(division: str | None = None) -> list[dict]:
         return [r for r in records if r.get("division", "").lower() == division.lower()]
     return records
 
-def add_agenda_task(task: str, division: str):
+def add_agenda_task(task: str, division: str, editor: str = "", approver: str = ""):
     ws = get_worksheet("Agenda")
-    ws.append_row([task, "FALSE", division, ""])
+    ws.append_row([task, "FALSE", division, "", editor, approver])
 
-def toggle_agenda_task(task_name: str, division: str, done: bool):
-    """Find a task by name + division and update its done state and done_at timestamp."""
+def toggle_agenda_task(task_name: str, division: str, done: bool,
+                       editor: str = "", approver: str = ""):
+    """Find a task by name + division and update its done state, timestamp, and audit columns."""
     ws = get_worksheet("Agenda")
     rows = ws.get_all_values()
     if len(rows) < 1:
@@ -74,17 +75,21 @@ def toggle_agenda_task(task_name: str, division: str, done: bool):
 
     headers = rows[0]
     try:
-        task_col  = headers.index("task")  + 1
-        done_col  = headers.index("done")  + 1
-        # done_at column may not exist yet — handle gracefully
-        try:
-            done_at_col = headers.index("done_at") + 1
-        except ValueError:
-            done_at_col = None
+        task_col = headers.index("task") + 1
+        done_col = headers.index("done") + 1
     except ValueError as e:
         print(f"[Sheets] Missing expected column in Agenda tab: {e}")
         return
 
+    def _col(name):
+        try:
+            return headers.index(name) + 1
+        except ValueError:
+            return None
+
+    done_at_col  = _col("done_at")
+    editor_col   = _col("editor")
+    approver_col = _col("approver")
     done_at_value = datetime.now(timezone.utc).isoformat() if done else ""
 
     for i, row in enumerate(rows[1:], start=2):
@@ -93,6 +98,10 @@ def toggle_agenda_task(task_name: str, division: str, done: bool):
             ws.update_cell(i, done_col, "TRUE" if done else "FALSE")
             if done_at_col:
                 ws.update_cell(i, done_at_col, done_at_value)
+            if editor_col and editor:
+                ws.update_cell(i, editor_col, editor)
+            if approver_col:
+                ws.update_cell(i, approver_col, approver)
             return
 
 def get_tasks_ready_to_move(hours: int) -> list[dict]:
@@ -135,7 +144,12 @@ def move_done_tasks_to_achievements(hours: int) -> int:
     """Move tasks that have been done for >= hours to Achievements. Returns count moved."""
     ready = get_tasks_ready_to_move(hours)
     for task in ready:
-        add_achievement(task.get("task", ""), task.get("division", "general"))
+        add_achievement(
+            task.get("task", ""),
+            task.get("division", "general"),
+            editor=task.get("editor", ""),
+            approver=task.get("approver", ""),
+        )
         delete_agenda_task(task.get("task", ""), task.get("division", "general"))
     return len(ready)
 
@@ -150,9 +164,9 @@ def get_achievements(division: str | None = None) -> list[dict]:
         return [r for r in records if r.get("division", "").lower() == division.lower()]
     return records
 
-def add_achievement(text: str, division: str):
+def add_achievement(text: str, division: str, editor: str = "", approver: str = ""):
     ws = get_worksheet("Achievements")
-    ws.append_row([text, division, datetime.now(timezone.utc).isoformat()])
+    ws.append_row([text, division, datetime.now(timezone.utc).isoformat(), editor, approver])
 
 
 def expire_old_achievements(hours: int) -> int:

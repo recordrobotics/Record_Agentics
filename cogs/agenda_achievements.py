@@ -21,6 +21,7 @@ from utils.permissions import (
     get_member_division, get_lead_division,
     get_member_divisions, get_lead_divisions,
     find_division_lead, is_unrestricted, is_leader,
+    captain_only,
 )
 from utils.sheets import (
     get_agenda_tasks, add_agenda_task,
@@ -177,7 +178,7 @@ class AddTaskModal(discord.ui.Modal, title="Add Task"):
 
         if can_edit_freely(self.member, division):
             for text in tasks:
-                add_agenda_task(text, division or "general")
+                add_agenda_task(text, division or "general", editor=self.member.display_name)
             await self.cog.refresh_panel()
             div_name = DIVISIONS.get(division or "", {}).get("name", "General")
             label = f"{len(tasks)} tasks" if len(tasks) > 1 else "Task"
@@ -235,7 +236,8 @@ class MarkAchievedSelect(discord.ui.Select):
         marked = 0
         for idx in self.values:
             task = self.eligible[int(idx)]
-            toggle_agenda_task(task["task"], task.get("division", "general"), True)
+            toggle_agenda_task(task["task"], task.get("division", "general"), True,
+                               editor=self.member.display_name)
             marked += 1
 
         if marked:
@@ -585,7 +587,7 @@ class AgendaAchievementsPanel(commands.Cog, name="AgendaAchievementsPanel"):
         name="setup_panel",
         description="Post or refresh the Agenda + Achievements panel",
     )
-    @app_commands.checks.has_permissions(manage_messages=True)
+    @captain_only()
     async def setup_panel(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         try:
@@ -593,6 +595,11 @@ class AgendaAchievementsPanel(commands.Cog, name="AgendaAchievementsPanel"):
             await _temp_followup(interaction, "Panel is live!")
         except Exception as e:
             await _temp_followup(interaction, f"Error: {e}")
+
+    @setup_panel.error
+    async def setup_panel_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        if isinstance(error, app_commands.CheckFailure):
+            await interaction.response.send_message("This command is for captains and mentors only.", ephemeral=True)
 
 
 async def setup(bot: commands.Bot):

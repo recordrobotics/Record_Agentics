@@ -1,4 +1,5 @@
 import discord
+from discord import app_commands
 from config import UNRESTRICTED_ROLE_IDS, LEADER_ROLE_ID, DIVISIONS
 
 
@@ -63,6 +64,13 @@ def can_request_edit(member: discord.Member, division: str) -> bool:
     if is_leader(member):
         return False  # leaders edit directly, not via requests
     return division in get_member_divisions(member)
+
+
+def captain_only() -> app_commands.check:
+    """Restricts a slash command to captains and mentors (unrestricted roles)."""
+    async def predicate(interaction: discord.Interaction) -> bool:
+        return is_unrestricted(interaction.user)
+    return app_commands.check(predicate)
 
 
 async def find_division_lead(guild: discord.Guild, division: str) -> discord.Member | None:
