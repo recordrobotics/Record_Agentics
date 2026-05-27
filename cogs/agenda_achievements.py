@@ -19,7 +19,8 @@ from config import DIVISIONS, DONE_TO_ACHIEVEMENT_HOURS, ACHIEVEMENT_DISPLAY_HOU
 from utils.permissions import (
     can_edit_freely, can_request_edit,
     get_member_division, get_lead_division,
-    find_division_lead, is_unrestricted,
+    get_member_divisions, get_lead_divisions,
+    find_division_lead, is_unrestricted, is_leader,
 )
 from utils.sheets import (
     get_agenda_tasks, add_agenda_task,
@@ -33,6 +34,13 @@ from utils.sheets import (
 MSG_ID_FILE = "agenda_achievements_msg_id.txt"
 
 _TEMP_MSG_DELAY = 4  # seconds before ephemeral confirmations vanish
+
+# Division display order (matches agenda panel order)
+_DIV_ORDER = {key: i for i, key in enumerate(DIVISIONS.keys())}
+
+
+def _sort_by_division(tasks: list[dict]) -> list[dict]:
+    return sorted(tasks, key=lambda t: _DIV_ORDER.get(t.get("division", "").lower(), 999))
 
 
 async def _temp_followup(interaction: discord.Interaction, content: str) -> None:
@@ -195,23 +203,14 @@ class MarkAchievedSelect(discord.ui.Select):
         self.member = member
         self.orig_interaction = orig_interaction
 
-        if is_unrestricted(member):
-            eligible = [t for t in tasks if str(t.get("done", "FALSE")).upper() != "TRUE"]
-        else:
-            lead_div = get_lead_division(member)
-            eligible = [
-                t for t in tasks
-                if t.get("division", "").lower() == (lead_div or "").lower()
-                and str(t.get("done", "FALSE")).upper() != "TRUE"
-            ] if lead_div else []
-
-        self.eligible = eligible[:25]
+        pending = [t for t in tasks if str(t.get("done", "FALSE")).upper() != "TRUE"]
+        self.eligible = _sort_by_division(pending)[:25]
         if self.eligible:
             options = [
                 discord.SelectOption(
                     label=t["task"][:100],
                     value=str(i),
-                    description=t.get("division", "general").title(),
+                    description=DIVISIONS.get(t.get("division", ""), {}).get("name", "General"),
                 )
                 for i, t in enumerate(self.eligible)
             ]
@@ -262,24 +261,26 @@ class MarkAchievedView(discord.ui.View):
 
 class RequestAchievedSelect(discord.ui.Select):
     def __init__(self, tasks: list[dict], cog: "AgendaAchievementsPanel",
-                 member: discord.Member, orig_interaction: discord.Interaction,
-                 division: str):
+                 member: discord.Member, orig_interaction: discord.Interaction):
         self.cog = cog
         self.member = member
         self.orig_interaction = orig_interaction
-        self.division = division
 
-        eligible = [t for t in tasks if str(t.get("done", "FALSE")).upper() != "TRUE"]
-        self.eligible = eligible[:25]
+        pending = [t for t in tasks if str(t.get("done", "FALSE")).upper() != "TRUE"]
+        self.eligible = _sort_by_division(pending)[:25]
 
         if self.eligible:
             options = [
-                discord.SelectOption(label=t["task"][:100], value=str(i))
+                discord.SelectOption(
+                    label=t["task"][:100],
+                    value=str(i),
+                    description=DIVISIONS.get(t.get("division", ""), {}).get("name", "General"),
+                )
                 for i, t in enumerate(self.eligible)
             ]
             max_vals = min(len(options), 25)
         else:
-            options = [discord.SelectOption(label="No pending tasks in your division", value="__none__")]
+            options = [discord.SelectOption(label="No pending tasks available", value="__none__")]
             max_vals = 1
 
         super().__init__(
@@ -291,7 +292,7 @@ class RequestAchievedSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         if "__none__" in self.values:
-            await _temp_response(interaction, "No pending tasks in your division.")
+            await _temp_response(interaction, "No pending tasks available.")
             return
 
         await interaction.response.defer(ephemeral=True)
@@ -301,26 +302,36 @@ class RequestAchievedSelect(discord.ui.Select):
             await _temp_followup(interaction, "Request system unavailable.")
             return
 
-        lead = await find_division_lead(self.member.guild, self.division)
-        submitted = 0
+        # Group selected tasks by division so we only DM each lead once per division
+        by_division: dict[str, list[dict]] = {}
         for idx in self.values:
             task = self.eligible[int(idx)]
-            request_id = create_request(
-                self.division, "agenda_toggle",
-                {"task_name": task["task"], "done": True},
-                self.member.id, self.member.display_name,
-            )
-            req = {
-                "id": request_id, "division": self.division,
-                "action": "agenda_toggle",
-                "payload": {"task_name": task["task"], "done": True},
-                "requester_name": self.member.display_name,
-                "requester_id": self.member.id, "status": "pending",
-            }
+            div = task.get("division", "general").lower()
+            by_division.setdefault(div, []).append(task)
+
+        submitted = 0
+        any_lead_found = False
+        for division, div_tasks in by_division.items():
+            lead = await find_division_lead(self.member.guild, division)
             if lead:
-                await handler.send_request_dm(self.member.guild, lead, req)
-            await handler.notify_requester_pending(self.member, req)
-            submitted += 1
+                any_lead_found = True
+            for task in div_tasks:
+                request_id = create_request(
+                    division, "agenda_toggle",
+                    {"task_name": task["task"], "done": True},
+                    self.member.id, self.member.display_name,
+                )
+                req = {
+                    "id": request_id, "division": division,
+                    "action": "agenda_toggle",
+                    "payload": {"task_name": task["task"], "done": True},
+                    "requester_name": self.member.display_name,
+                    "requester_id": self.member.id, "status": "pending",
+                }
+                if lead:
+                    await handler.send_request_dm(self.member.guild, lead, req)
+                await handler.notify_requester_pending(self.member, req)
+                submitted += 1
 
         try:
             await self.orig_interaction.delete_original_response()
@@ -328,34 +339,41 @@ class RequestAchievedSelect(discord.ui.Select):
             pass
 
         if submitted:
-            div_name = DIVISIONS.get(self.division, {}).get("name", "your division")
             label = f"{submitted} request(s)" if submitted > 1 else "Request"
-            if lead:
-                await _temp_followup(interaction, f"{label} submitted to **{div_name}** lead — check your DMs for status.")
+            if any_lead_found:
+                await _temp_followup(interaction, f"{label} submitted to division lead(s) — check your DMs for status.")
             else:
                 await _temp_followup(interaction, f"{label} saved, but no division lead found. Ask a captain to follow up.")
 
 
 class RequestAchievedView(discord.ui.View):
     def __init__(self, tasks: list[dict], cog: "AgendaAchievementsPanel",
-                 member: discord.Member, orig_interaction: discord.Interaction,
-                 division: str):
+                 member: discord.Member, orig_interaction: discord.Interaction):
         super().__init__(timeout=60)
-        self.add_item(RequestAchievedSelect(tasks, cog, member, orig_interaction, division))
+        self.add_item(RequestAchievedSelect(tasks, cog, member, orig_interaction))
 
 
 # ─── Division picker (select → opens modal) ───────────────────────────────────
 
 class DivisionPickerSelect(discord.ui.Select):
     def __init__(self, cog: "AgendaAchievementsPanel", member: discord.Member,
-                 orig_interaction: discord.Interaction):
+                 orig_interaction: discord.Interaction,
+                 allowed_keys: list[str] | None = None):
         self.cog = cog
         self.member = member
         self.orig_interaction = orig_interaction
-        options = [
+
+        all_options = [
             discord.SelectOption(label=div["name"], value=key, emoji=div["emoji"])
             for key, div in DIVISIONS.items()
-        ] + [discord.SelectOption(label="General", value="general", emoji="📌")]
+        ]
+        if allowed_keys is None:
+            # Unrestricted: all divisions + General
+            all_options.append(discord.SelectOption(label="General", value="general", emoji="📌"))
+            options = all_options
+        else:
+            options = [o for o in all_options if o.value in allowed_keys]
+
         super().__init__(placeholder="Select a division…", options=options)
 
     async def callback(self, interaction: discord.Interaction):
@@ -369,9 +387,10 @@ class DivisionPickerSelect(discord.ui.Select):
 
 class DivisionPickerView(discord.ui.View):
     def __init__(self, cog: "AgendaAchievementsPanel", member: discord.Member,
-                 orig_interaction: discord.Interaction):
+                 orig_interaction: discord.Interaction,
+                 allowed_keys: list[str] | None = None):
         super().__init__(timeout=60)
-        self.add_item(DivisionPickerSelect(cog, member, orig_interaction))
+        self.add_item(DivisionPickerSelect(cog, member, orig_interaction, allowed_keys=allowed_keys))
 
 
 # ─── View ─────────────────────────────────────────────────────────────────────
@@ -386,33 +405,73 @@ class AgendaAchievementsView(discord.ui.View):
     async def add_task(self, interaction: discord.Interaction, button: discord.ui.Button):
         member = interaction.user
         if is_unrestricted(member):
+            # All divisions + General
             await interaction.response.send_message(
                 "Which division is this task for?",
                 view=DivisionPickerView(self.cog, member, interaction),
                 ephemeral=True,
             )
+        elif is_leader(member):
+            divs = get_lead_divisions(member)
+            if not divs:
+                await interaction.response.send_modal(AddTaskModal(self.cog, member))
+            elif len(divs) == 1:
+                await interaction.response.send_modal(
+                    AddTaskModal(self.cog, member, division_override=divs[0])
+                )
+            else:
+                await interaction.response.send_message(
+                    "Which division is this task for?",
+                    view=DivisionPickerView(self.cog, member, interaction, allowed_keys=divs),
+                    ephemeral=True,
+                )
         else:
-            await interaction.response.send_modal(AddTaskModal(self.cog, member))
+            divs = get_member_divisions(member)
+            if not divs:
+                await interaction.response.send_modal(AddTaskModal(self.cog, member))
+            elif len(divs) == 1:
+                await interaction.response.send_modal(
+                    AddTaskModal(self.cog, member, division_override=divs[0])
+                )
+            else:
+                await interaction.response.send_message(
+                    "Which division is this task for?",
+                    view=DivisionPickerView(self.cog, member, interaction, allowed_keys=divs),
+                    ephemeral=True,
+                )
 
     @discord.ui.button(label="Move to Achieved", style=discord.ButtonStyle.success, emoji="⭐", row=1)
     async def move_to_achieved(self, interaction: discord.Interaction, button: discord.ui.Button):
         member = interaction.user
-        if can_edit_freely(member):
-            tasks = get_agenda_tasks()
+        all_tasks = get_agenda_tasks()
+
+        if is_unrestricted(member):
+            # All tasks across all divisions
+            await interaction.response.send_message(
+                "Select tasks to mark as done:",
+                view=MarkAchievedView(all_tasks, self.cog, member, interaction),
+                ephemeral=True,
+            )
+        elif is_leader(member):
+            divs = get_lead_divisions(member)
+            if not divs:
+                await _temp_response(interaction, "You don't have a division role set.")
+                return
+            tasks = [t for t in all_tasks if t.get("division", "").lower() in divs]
             await interaction.response.send_message(
                 "Select tasks to mark as done:",
                 view=MarkAchievedView(tasks, self.cog, member, interaction),
                 ephemeral=True,
             )
         else:
-            division = get_lead_division(member) or get_member_division(member)
-            if not division:
+            divs = get_member_divisions(member)
+            if not divs:
                 await _temp_response(interaction, "You don't have a division role set. Ask a captain to assign you one.")
                 return
-            tasks = get_agenda_tasks(division)
+            tasks = [t for t in all_tasks if t.get("division", "").lower() in divs]
             await interaction.response.send_message(
                 "Select tasks to request marking as done:",
-                view=RequestAchievedView(tasks, self.cog, member, interaction, division),
+                view=RequestAchievedView(tasks, self.cog, member, interaction),
                 ephemeral=True,
             )
 
