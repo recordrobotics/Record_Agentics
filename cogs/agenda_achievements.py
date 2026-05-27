@@ -204,52 +204,64 @@ class MarkAchievedSelect(discord.ui.Select):
         self.member = member
         self.orig_interaction = orig_interaction
 
-        pending = [t for t in tasks if str(t.get("done", "FALSE")).upper() != "TRUE"]
-        self.eligible = _sort_by_division(pending)[:25]
-        if self.eligible:
+        # All agenda tasks in scope — done ones pre-selected, undone ones unselected
+        self.all_tasks = _sort_by_division(tasks)[:25]
+        if self.all_tasks:
             options = [
                 discord.SelectOption(
                     label=t["task"][:100],
                     value=str(i),
-                    description=DIVISIONS.get(t.get("division", ""), {}).get("name", "General"),
+                    description=(
+                        DIVISIONS.get(t.get("division", ""), {}).get("name", "General")
+                        + (" • Done" if str(t.get("done", "FALSE")).upper() == "TRUE" else "")
+                    ),
+                    default=str(t.get("done", "FALSE")).upper() == "TRUE",
                 )
-                for i, t in enumerate(self.eligible)
+                for i, t in enumerate(self.all_tasks)
             ]
             max_vals = min(len(options), 25)
         else:
-            options = [discord.SelectOption(label="No pending tasks available", value="__none__")]
+            options = [discord.SelectOption(label="No tasks available", value="__none__")]
             max_vals = 1
 
         super().__init__(
-            placeholder="Select tasks to mark as done…",
+            placeholder="Check/uncheck tasks to mark done or undo…",
             options=options,
-            min_values=1,
+            min_values=0,
             max_values=max_vals,
         )
 
     async def callback(self, interaction: discord.Interaction):
         if "__none__" in self.values:
-            await _temp_response(interaction, "No pending tasks available.")
+            await _temp_response(interaction, "No tasks available.")
             return
 
         await interaction.response.defer(ephemeral=True)
-        marked = 0
-        for idx in self.values:
-            task = self.eligible[int(idx)]
-            toggle_agenda_task(task["task"], task.get("division", "general"), True,
-                               editor=self.member.display_name)
-            marked += 1
+        selected = {int(v) for v in self.values}
+        changed = 0
 
-        if marked:
+        for i, task in enumerate(self.all_tasks):
+            was_done   = str(task.get("done", "FALSE")).upper() == "TRUE"
+            now_marked = i in selected
+            if now_marked and not was_done:
+                toggle_agenda_task(task["task"], task.get("division", "general"), True,
+                                   editor=self.member.display_name)
+                changed += 1
+            elif not now_marked and was_done:
+                toggle_agenda_task(task["task"], task.get("division", "general"), False,
+                                   editor=self.member.display_name)
+                changed += 1
+
+        if changed:
             await self.cog.refresh_panel()
         try:
             await self.orig_interaction.delete_original_response()
         except Exception:
             pass
-        await _temp_followup(
-            interaction,
-            f"Marked {marked} task(s) as done — moves to Achievements in {DONE_TO_ACHIEVEMENT_HOURS}h.",
-        )
+        if changed:
+            await _temp_followup(interaction, f"Updated {changed} task(s).")
+        else:
+            await _temp_followup(interaction, "No changes made.")
 
 
 class MarkAchievedView(discord.ui.View):
@@ -268,33 +280,37 @@ class RequestAchievedSelect(discord.ui.Select):
         self.member = member
         self.orig_interaction = orig_interaction
 
-        pending = [t for t in tasks if str(t.get("done", "FALSE")).upper() != "TRUE"]
-        self.eligible = _sort_by_division(pending)[:25]
+        # All agenda tasks in scope — done ones pre-selected
+        self.all_tasks = _sort_by_division(tasks)[:25]
 
-        if self.eligible:
+        if self.all_tasks:
             options = [
                 discord.SelectOption(
                     label=t["task"][:100],
                     value=str(i),
-                    description=DIVISIONS.get(t.get("division", ""), {}).get("name", "General"),
+                    description=(
+                        DIVISIONS.get(t.get("division", ""), {}).get("name", "General")
+                        + (" • Done" if str(t.get("done", "FALSE")).upper() == "TRUE" else "")
+                    ),
+                    default=str(t.get("done", "FALSE")).upper() == "TRUE",
                 )
-                for i, t in enumerate(self.eligible)
+                for i, t in enumerate(self.all_tasks)
             ]
             max_vals = min(len(options), 25)
         else:
-            options = [discord.SelectOption(label="No pending tasks available", value="__none__")]
+            options = [discord.SelectOption(label="No tasks available", value="__none__")]
             max_vals = 1
 
         super().__init__(
-            placeholder="Select tasks to request marking as done…",
+            placeholder="Check/uncheck tasks to request done or undo…",
             options=options,
-            min_values=1,
+            min_values=0,
             max_values=max_vals,
         )
 
     async def callback(self, interaction: discord.Interaction):
         if "__none__" in self.values:
-            await _temp_response(interaction, "No pending tasks available.")
+            await _temp_response(interaction, "No tasks available.")
             return
 
         await interaction.response.defer(ephemeral=True)
@@ -304,29 +320,41 @@ class RequestAchievedSelect(discord.ui.Select):
             await _temp_followup(interaction, "Request system unavailable.")
             return
 
-        # Group selected tasks by division so we only DM each lead once per division
-        by_division: dict[str, list[dict]] = {}
-        for idx in self.values:
-            task = self.eligible[int(idx)]
-            div = task.get("division", "general").lower()
-            by_division.setdefault(div, []).append(task)
+        selected = {int(v) for v in self.values}
+
+        # Collect only tasks whose state changed, grouped by division
+        changes_by_division: dict[str, list[tuple[dict, bool]]] = {}
+        for i, task in enumerate(self.all_tasks):
+            was_done   = str(task.get("done", "FALSE")).upper() == "TRUE"
+            now_marked = i in selected
+            if now_marked != was_done:
+                div = task.get("division", "general").lower()
+                changes_by_division.setdefault(div, []).append((task, now_marked))
+
+        if not changes_by_division:
+            try:
+                await self.orig_interaction.delete_original_response()
+            except Exception:
+                pass
+            await _temp_followup(interaction, "No changes made.")
+            return
 
         submitted = 0
         any_lead_found = False
-        for division, div_tasks in by_division.items():
+        for division, changes in changes_by_division.items():
             lead = await find_division_lead(self.member.guild, division)
             if lead:
                 any_lead_found = True
-            for task in div_tasks:
+            for task, new_done in changes:
                 request_id = create_request(
                     division, "agenda_toggle",
-                    {"task_name": task["task"], "done": True},
+                    {"task_name": task["task"], "done": new_done},
                     self.member.id, self.member.display_name,
                 )
                 req = {
                     "id": request_id, "division": division,
                     "action": "agenda_toggle",
-                    "payload": {"task_name": task["task"], "done": True},
+                    "payload": {"task_name": task["task"], "done": new_done},
                     "requester_name": self.member.display_name,
                     "requester_id": self.member.id, "status": "pending",
                 }
@@ -340,12 +368,11 @@ class RequestAchievedSelect(discord.ui.Select):
         except Exception:
             pass
 
-        if submitted:
-            label = f"{submitted} request(s)" if submitted > 1 else "Request"
-            if any_lead_found:
-                await _temp_followup(interaction, f"{label} submitted to division lead(s) — check your DMs for status.")
-            else:
-                await _temp_followup(interaction, f"{label} saved, but no division lead found. Ask a captain to follow up.")
+        label = f"{submitted} request(s)" if submitted > 1 else "Request"
+        if any_lead_found:
+            await _temp_followup(interaction, f"{label} submitted to division lead(s) — check your DMs for status.")
+        else:
+            await _temp_followup(interaction, f"{label} saved, but no division lead found. Ask a captain to follow up.")
 
 
 class RequestAchievedView(discord.ui.View):
@@ -448,9 +475,8 @@ class AgendaAchievementsView(discord.ui.View):
         all_tasks = get_agenda_tasks()
 
         if is_unrestricted(member):
-            # All tasks across all divisions
             await interaction.response.send_message(
-                "Select tasks to mark as done:",
+                "Check tasks to mark done — pre-checked tasks are already done (deselect to undo):",
                 view=MarkAchievedView(all_tasks, self.cog, member, interaction),
                 ephemeral=True,
             )
@@ -461,7 +487,7 @@ class AgendaAchievementsView(discord.ui.View):
                 return
             tasks = [t for t in all_tasks if t.get("division", "").lower() in divs]
             await interaction.response.send_message(
-                "Select tasks to mark as done:",
+                "Check tasks to mark done — pre-checked tasks are already done (deselect to undo):",
                 view=MarkAchievedView(tasks, self.cog, member, interaction),
                 ephemeral=True,
             )
@@ -472,16 +498,10 @@ class AgendaAchievementsView(discord.ui.View):
                 return
             tasks = [t for t in all_tasks if t.get("division", "").lower() in divs]
             await interaction.response.send_message(
-                "Select tasks to request marking as done:",
+                "Check tasks to request done — pre-checked tasks are already done (deselect to request undo):",
                 view=RequestAchievedView(tasks, self.cog, member, interaction),
                 ephemeral=True,
             )
-
-    @discord.ui.button(label="Refresh", style=discord.ButtonStyle.secondary, emoji="🔄", row=1)
-    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
-        await self.cog.refresh_panel(interaction.user)
-        await _temp_followup(interaction, "Refreshed.")
 
 
 # ─── Cog ──────────────────────────────────────────────────────────────────────
@@ -492,6 +512,7 @@ class AgendaAchievementsPanel(commands.Cog, name="AgendaAchievementsPanel"):
         self.channel_id = AGENDA_ACHIEVEMENTS_CHANNEL_ID
         self.message_id = self._load_id()
         self.auto_move_loop.start()
+        self.panel_refresh_loop.start()
 
     def _load_id(self) -> int | None:
         try:
@@ -529,11 +550,20 @@ class AgendaAchievementsPanel(commands.Cog, name="AgendaAchievementsPanel"):
         msg = await channel.send(embed=embed, view=view)
         self._save_id(msg.id)
 
-    # ── Hourly loop: move done tasks, expire old achievements, refresh ─────────
+    # ── Per-minute panel refresh ───────────────────────────────────────────────
+
+    @tasks.loop(minutes=1)
+    async def panel_refresh_loop(self):
+        await self.refresh_panel()
+
+    @panel_refresh_loop.before_loop
+    async def before_panel_refresh(self):
+        await self.bot.wait_until_ready()
+
+    # ── Hourly loop: move done tasks + expire old achievements ─────────────────
 
     @tasks.loop(hours=1)
     async def auto_move_loop(self):
-        await self.bot.wait_until_ready()
         moved   = move_done_tasks_to_achievements(DONE_TO_ACHIEVEMENT_HOURS)
         expired = expire_old_achievements(ACHIEVEMENT_DISPLAY_HOURS)
         if moved or expired:
