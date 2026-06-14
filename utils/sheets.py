@@ -55,6 +55,18 @@ def get_worksheet(tab_name: str):
     return ws
 
 
+def get_or_create_worksheet(tab_name: str, cols: int = 26):
+    """Like get_worksheet, but creates the tab if it doesn't exist yet — so a
+    newly-introduced tab (e.g. Meetings) doesn't make writes fail forever."""
+    try:
+        return get_worksheet(tab_name)
+    except gspread.WorksheetNotFound:
+        ws = _get_spreadsheet().add_worksheet(title=tab_name, rows=100, cols=max(26, cols))
+        _worksheets[tab_name] = ws
+        print(f"[Sheets] Created missing tab '{tab_name}'.")
+        return ws
+
+
 # ─── Read ───────────────────────────────────────────────────────────────────────
 
 def read_table(tab_name: str) -> tuple[list[str], list[dict]]:
@@ -69,11 +81,12 @@ def read_table(tab_name: str) -> tuple[list[str], list[dict]]:
         ws = get_worksheet(tab_name)
         rows = ws.get_all_values()
     except gspread.WorksheetNotFound:
+        # A genuinely-absent tab is "empty", not an error.
         print(f"[Sheets] Tab '{tab_name}' not found. Create it in your spreadsheet.")
         return [], []
-    except Exception as e:
-        print(f"[Sheets] Error reading tab '{tab_name}': {e}")
-        return [], []
+    # Any other error (network, auth, quota) is propagated so callers can tell a
+    # real failure apart from an empty tab — important so a transient read error
+    # never gets mistaken for "the sheet is now empty".
 
     if not rows:
         return [], []
@@ -102,8 +115,8 @@ def overwrite_table(tab_name: str, header: list[str], rows: list[list], prev_row
     Returns the number of data rows written, so the caller can track the row count
     for the next flush's padding.
     """
-    ws = get_worksheet(tab_name)
     width = len(header)
+    ws = get_or_create_worksheet(tab_name, cols=width)
     values = [header] + [r + [""] * (width - len(r)) for r in rows]
 
     # Pad with blank rows to overwrite any rows that existed before but don't now.

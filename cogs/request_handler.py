@@ -13,8 +13,9 @@ from discord.ext import commands
 from config import DIVISIONS, RESULT_DM_DISPLAY_HOURS
 from utils.store import (
     get_request, update_request_status,
-    add_agenda_task, toggle_agenda_task,
+    add_agenda_task, complete_task,
     add_achievement, resolve_task_id,
+    uncomplete_achievement, resolve_achievement_id,
 )
 
 
@@ -32,8 +33,10 @@ def make_request_embed(req: dict, status: str = "pending") -> discord.Embed:
     div_name = DIVISIONS.get(req["division"], {}).get("name", req["division"])
     action_labels = {
         "agenda_add":      "Add Agenda Task",
-        "agenda_toggle":   "Toggle Agenda Task",
-        "achievement_add": "Add Achievement",
+        "agenda_complete":  "Complete Task → Achievement",
+        "agenda_toggle":    "Complete Task → Achievement",
+        "achievement_add":  "Add Achievement",
+        "achievement_undo": "Undo Achievement → Agenda",
     }
     action_label = action_labels.get(req["action"], req["action"])
 
@@ -54,10 +57,12 @@ def make_request_embed(req: dict, status: str = "pending") -> discord.Embed:
     payload = req.get("payload", {})
     if req["action"] in ("agenda_add", "achievement_add"):
         embed.add_field(name="Content", value=payload.get("text", "—"), inline=False)
-    elif req["action"] == "agenda_toggle":
-        new_state = "✅ Done" if payload.get("done") else "☐ Undone"
-        embed.add_field(name="Task",      value=payload.get("task_name", "—"), inline=False)
-        embed.add_field(name="New State", value=new_state,                     inline=True)
+    elif req["action"] in ("agenda_complete", "agenda_toggle"):
+        embed.add_field(name="Task", value=payload.get("task_name", "—"), inline=False)
+        embed.add_field(name="Action", value="Move to 🏅 Achievements", inline=True)
+    elif req["action"] == "achievement_undo":
+        embed.add_field(name="Achievement", value=payload.get("achievement_name", "—"), inline=False)
+        embed.add_field(name="Action", value="Move back to 📋 Agenda", inline=True)
 
     status_label = {"pending": "⏳ Pending", "approved": "✅ Approved", "denied": "❌ Denied"}
     embed.set_footer(text=f"Request ID: {req['id']}  •  {status_label.get(status, status)}")
@@ -104,18 +109,23 @@ class RequestHandler(commands.Cog):
             if req["action"] == "agenda_add":
                 add_agenda_task(payload["text"], req["division"],
                                 editor=editor, approver=approver)
-            elif req["action"] == "agenda_toggle":
-                # Prefer the stable id; fall back to name lookup for legacy
-                # requests created before tasks carried ids.
+            elif req["action"] in ("agenda_complete", "agenda_toggle"):
+                # Move the task to Achievements. Prefer the stable id; fall back
+                # to a name lookup for legacy requests created before task ids.
                 task_id = payload.get("task_id") or resolve_task_id(
                     payload.get("task_name", ""), req["division"]
                 )
                 if task_id:
-                    toggle_agenda_task(task_id, payload["done"],
-                                       editor=editor, approver=approver)
+                    complete_task(task_id, editor=editor, approver=approver)
             elif req["action"] == "achievement_add":
                 add_achievement(payload["text"], req["division"],
                                 editor=editor, approver=approver)
+            elif req["action"] == "achievement_undo":
+                ach_id = payload.get("ach_id") or resolve_achievement_id(
+                    payload.get("achievement_name", ""), req["division"]
+                )
+                if ach_id:
+                    uncomplete_achievement(ach_id, editor=editor, approver=approver)
         except Exception as e:
             await interaction.followup.send(f"Failed to apply change: {e}")
             return

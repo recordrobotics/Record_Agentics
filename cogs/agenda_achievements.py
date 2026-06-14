@@ -12,10 +12,11 @@ import asyncio
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
-from datetime import datetime, timezone
-import os
+from datetime import datetime as _dt
 
-from config import DIVISIONS, DONE_TO_ACHIEVEMENT_HOURS, ACHIEVEMENT_DISPLAY_HOURS, AGENDA_ACHIEVEMENTS_CHANNEL_ID
+from config import DIVISIONS
+from utils import channels
+from utils.meetings import recent_past_meetings
 from utils.permissions import (
     can_edit_freely, can_request_edit,
     get_member_division, get_lead_division,
@@ -25,11 +26,11 @@ from utils.permissions import (
 )
 from utils.store import (
     get_agenda_tasks, add_agenda_task,
-    toggle_agenda_task, delete_agenda_task,
-    get_achievements,
-    move_done_tasks_to_achievements,
-    expire_old_achievements,
+    complete_task, delete_agenda_task,
+    get_achievements, uncomplete_achievement,
+    prune_achievements_before,
     create_request,
+    resync as store_resync,
 )
 
 MSG_ID_FILE = "agenda_achievements_msg_id.txt"
@@ -68,49 +69,35 @@ async def _temp_response(interaction: discord.Interaction, content: str) -> None
 
 # ─── Embed builder ────────────────────────────────────────────────────────────
 
-def _time_left_label(done_at_str: str) -> str:
-    try:
-        done_at = datetime.fromisoformat(done_at_str)
-        now = datetime.now(timezone.utc)
-        remaining = DONE_TO_ACHIEVEMENT_HOURS - (now - done_at).total_seconds() / 3600
-        if remaining <= 1:
-            return "moves soon"
-        elif remaining < 24:
-            return f"moves in {int(remaining)}h"
-        else:
-            return f"moves in {int(remaining / 24)}d"
-    except Exception:
-        return ""
+def _group_by_division(items: list[dict], text_key: str, bullet: str) -> list[str]:
+    """Render a list of rows into division-grouped markdown lines."""
+    groups: dict[str, list[str]] = {}
+    for it in items:
+        div = it.get("division", "general").lower()
+        groups.setdefault(div, []).append(f"{bullet}  {it[text_key]}")
+
+    lines: list[str] = []
+    for key, div in DIVISIONS.items():
+        if key in groups:
+            lines.append(f"### {div['emoji']} {div['name']}")
+            lines.extend(groups[key])
+            lines.append("")
+    if "general" in groups:
+        lines.append("### 📌 General")
+        lines.extend(groups["general"])
+        lines.append("")
+    return lines
 
 
-def build_embed(agenda: list[dict], achievements: list[dict]) -> discord.Embed:
+def build_embed(agenda: list[dict], achievements: list[dict],
+                m_last: "_dt | None") -> discord.Embed:
     lines: list[str] = []
 
     # ── Agenda ────────────────────────────────────────────────────────────────
     lines.append("## 📋  Agenda")
-
-    agenda_groups: dict[str, list[str]] = {}
-    for t in agenda:
-        div = t.get("division", "general").lower()
-        done = str(t.get("done", "FALSE")).upper() == "TRUE"
-        if done:
-            done_at = str(t.get("done_at", "")).strip()
-            hint = f"  *({_time_left_label(done_at)})*" if done_at else ""
-            line = f"~~{t['task']}~~{hint}"
-        else:
-            line = f"• {t['task']}"
-        agenda_groups.setdefault(div, []).append(line)
-
-    if agenda_groups:
-        for key, div in DIVISIONS.items():
-            if key in agenda_groups:
-                lines.append(f"### {div['emoji']} {div['name']}")
-                lines.extend(agenda_groups[key])
-                lines.append("")
-        if "general" in agenda_groups:
-            lines.append("### 📌 General")
-            lines.extend(agenda_groups["general"])
-            lines.append("")
+    agenda_lines = _group_by_division(agenda, "task", "•")
+    if agenda_lines:
+        lines.extend(agenda_lines)
     else:
         lines.append("*No tasks yet.*")
         lines.append("")
@@ -118,26 +105,29 @@ def build_embed(agenda: list[dict], achievements: list[dict]) -> discord.Embed:
     lines.append("─" * 40)
     lines.append("")
 
-    # ── Achievements ──────────────────────────────────────────────────────────
+    # ── Achievements (split into the two most recent meeting windows) ──────────
     lines.append("## 🏅  Achievements")
 
-    ach_groups: dict[str, list[str]] = {}
+    since_last, previous = [], []
     for a in achievements:
-        div = a.get("division", "general").lower()
-        ach_groups.setdefault(div, []).append(f"🏆  {a['achievement']}")
+        ts = str(a.get("achieved_at", "")).strip()
+        completed_after_last = True
+        if m_last and ts:
+            try:
+                completed_after_last = _dt.fromisoformat(ts) >= m_last
+            except ValueError:
+                completed_after_last = True
+        (since_last if completed_after_last else previous).append(a)
 
-    if ach_groups:
-        for key, div in DIVISIONS.items():
-            if key in ach_groups:
-                lines.append(f"### {div['emoji']} {div['name']}")
-                lines.extend(ach_groups[key])
-                lines.append("")
-        if "general" in ach_groups:
-            lines.append("### 📌 General")
-            lines.extend(ach_groups["general"])
-            lines.append("")
-    else:
+    if not since_last and not previous:
         lines.append("*Nothing here yet — completed tasks appear here automatically.*")
+    else:
+        lines.append("### Since last meeting")
+        body = _group_by_division(since_last, "achievement", "🏆")
+        lines.extend(body if body else ["*— none —*", ""])
+        if previous:
+            lines.append("### Previous meeting")
+            lines.extend(_group_by_division(previous, "achievement", "🏆"))
 
     description = "\n".join(lines)
     if len(description) > 4096:
@@ -145,8 +135,8 @@ def build_embed(agenda: list[dict], achievements: list[dict]) -> discord.Embed:
 
     embed = discord.Embed(description=description, color=discord.Color.blurple())
     embed.set_footer(
-        text=f"Crossed-off → Achievements after {DONE_TO_ACHIEVEMENT_HOURS}h  •  "
-             f"Achievements hidden after {ACHIEVEMENT_DISPLAY_HOURS}h  •  "
+        text="Completed tasks move to Achievements instantly  •  "
+             "Achievements clear after 2 meetings  •  "
              "Leads edit directly  •  Members submit a request"
     )
     return embed
@@ -204,18 +194,13 @@ class MarkAchievedSelect(discord.ui.Select):
         self.member = member
         self.orig_interaction = orig_interaction
 
-        # All agenda tasks in scope — done ones pre-selected, undone ones unselected
         self.all_tasks = _sort_by_division(tasks)[:25]
         if self.all_tasks:
             options = [
                 discord.SelectOption(
                     label=t["task"][:100],
                     value=str(i),
-                    description=(
-                        DIVISIONS.get(t.get("division", ""), {}).get("name", "General")
-                        + (" • Done" if str(t.get("done", "FALSE")).upper() == "TRUE" else "")
-                    ),
-                    default=str(t.get("done", "FALSE")).upper() == "TRUE",
+                    description=DIVISIONS.get(t.get("division", ""), {}).get("name", "General"),
                 )
                 for i, t in enumerate(self.all_tasks)
             ]
@@ -225,7 +210,7 @@ class MarkAchievedSelect(discord.ui.Select):
             max_vals = 1
 
         super().__init__(
-            placeholder="Check/uncheck tasks to mark done or undo…",
+            placeholder="Select tasks to move to Achievements…",
             options=options,
             min_values=0,
             max_values=max_vals,
@@ -239,15 +224,8 @@ class MarkAchievedSelect(discord.ui.Select):
         await interaction.response.defer(ephemeral=True)
         selected = {int(v) for v in self.values}
         changed = 0
-
         for i, task in enumerate(self.all_tasks):
-            was_done   = str(task.get("done", "FALSE")).upper() == "TRUE"
-            now_marked = i in selected
-            if now_marked and not was_done:
-                toggle_agenda_task(task["id"], True, editor=self.member.display_name)
-                changed += 1
-            elif not now_marked and was_done:
-                toggle_agenda_task(task["id"], False, editor=self.member.display_name)
+            if i in selected and complete_task(task["id"], editor=self.member.display_name):
                 changed += 1
 
         if changed:
@@ -256,10 +234,10 @@ class MarkAchievedSelect(discord.ui.Select):
             await self.orig_interaction.delete_original_response()
         except Exception:
             pass
-        if changed:
-            await _temp_followup(interaction, f"Updated {changed} task(s).")
-        else:
-            await _temp_followup(interaction, "No changes made.")
+        await _temp_followup(
+            interaction,
+            f"Moved {changed} task(s) to Achievements." if changed else "No changes made.",
+        )
 
 
 class MarkAchievedView(discord.ui.View):
@@ -286,11 +264,7 @@ class RequestAchievedSelect(discord.ui.Select):
                 discord.SelectOption(
                     label=t["task"][:100],
                     value=str(i),
-                    description=(
-                        DIVISIONS.get(t.get("division", ""), {}).get("name", "General")
-                        + (" • Done" if str(t.get("done", "FALSE")).upper() == "TRUE" else "")
-                    ),
-                    default=str(t.get("done", "FALSE")).upper() == "TRUE",
+                    description=DIVISIONS.get(t.get("division", ""), {}).get("name", "General"),
                 )
                 for i, t in enumerate(self.all_tasks)
             ]
@@ -300,7 +274,7 @@ class RequestAchievedSelect(discord.ui.Select):
             max_vals = 1
 
         super().__init__(
-            placeholder="Check/uncheck tasks to request done or undo…",
+            placeholder="Select tasks to request moving to Achievements…",
             options=options,
             min_values=0,
             max_values=max_vals,
@@ -319,17 +293,9 @@ class RequestAchievedSelect(discord.ui.Select):
             return
 
         selected = {int(v) for v in self.values}
+        chosen = [task for i, task in enumerate(self.all_tasks) if i in selected]
 
-        # Collect only tasks whose state changed, grouped by division
-        changes_by_division: dict[str, list[tuple[dict, bool]]] = {}
-        for i, task in enumerate(self.all_tasks):
-            was_done   = str(task.get("done", "FALSE")).upper() == "TRUE"
-            now_marked = i in selected
-            if now_marked != was_done:
-                div = task.get("division", "general").lower()
-                changes_by_division.setdefault(div, []).append((task, now_marked))
-
-        if not changes_by_division:
+        if not chosen:
             try:
                 await self.orig_interaction.delete_original_response()
             except Exception:
@@ -337,21 +303,26 @@ class RequestAchievedSelect(discord.ui.Select):
             await _temp_followup(interaction, "No changes made.")
             return
 
+        # Group chosen tasks by division so each goes to the right lead.
+        by_division: dict[str, list[dict]] = {}
+        for task in chosen:
+            by_division.setdefault(task.get("division", "general").lower(), []).append(task)
+
         submitted = 0
         any_lead_found = False
-        for division, changes in changes_by_division.items():
+        for division, tasks in by_division.items():
             lead = await find_division_lead(self.member.guild, division)
             if lead:
                 any_lead_found = True
-            for task, new_done in changes:
-                payload = {"task_id": task["id"], "task_name": task["task"], "done": new_done}
+            for task in tasks:
+                payload = {"task_id": task["id"], "task_name": task["task"]}
                 request_id = create_request(
-                    division, "agenda_toggle", payload,
+                    division, "agenda_complete", payload,
                     self.member.id, self.member.display_name,
                 )
                 req = {
                     "id": request_id, "division": division,
-                    "action": "agenda_toggle",
+                    "action": "agenda_complete",
                     "payload": payload,
                     "requester_name": self.member.display_name,
                     "requester_id": self.member.id, "status": "pending",
@@ -378,6 +349,145 @@ class RequestAchievedView(discord.ui.View):
                  member: discord.Member, orig_interaction: discord.Interaction):
         super().__init__(timeout=60)
         self.add_item(RequestAchievedSelect(tasks, cog, member, orig_interaction))
+
+
+# ─── Undo: move an achievement back to the Agenda (leads/captains direct) ──────
+
+def _ach_options(items: list[dict]) -> tuple[list[discord.SelectOption], int]:
+    if items:
+        options = [
+            discord.SelectOption(
+                label=a["achievement"][:100],
+                value=str(i),
+                description=DIVISIONS.get(a.get("division", ""), {}).get("name", "General"),
+            )
+            for i, a in enumerate(items)
+        ]
+        return options, min(len(options), 25)
+    return [discord.SelectOption(label="No achievements available", value="__none__")], 1
+
+
+class UndoAchievedSelect(discord.ui.Select):
+    def __init__(self, achievements: list[dict], cog: "AgendaAchievementsPanel",
+                 member: discord.Member, orig_interaction: discord.Interaction):
+        self.cog = cog
+        self.member = member
+        self.orig_interaction = orig_interaction
+        self.all_items = _sort_by_division(achievements)[:25]
+        options, max_vals = _ach_options(self.all_items)
+        super().__init__(
+            placeholder="Select achievements to move back to Agenda…",
+            options=options, min_values=0, max_values=max_vals,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if "__none__" in self.values:
+            await _temp_response(interaction, "No achievements available.")
+            return
+        await interaction.response.defer(ephemeral=True)
+        selected = {int(v) for v in self.values}
+        changed = 0
+        for i, a in enumerate(self.all_items):
+            if i in selected and uncomplete_achievement(a["id"], editor=self.member.display_name):
+                changed += 1
+        if changed:
+            await self.cog.refresh_panel()
+        try:
+            await self.orig_interaction.delete_original_response()
+        except Exception:
+            pass
+        await _temp_followup(
+            interaction,
+            f"Moved {changed} achievement(s) back to Agenda." if changed else "No changes made.",
+        )
+
+
+class UndoAchievedView(discord.ui.View):
+    def __init__(self, achievements: list[dict], cog: "AgendaAchievementsPanel",
+                 member: discord.Member, orig_interaction: discord.Interaction):
+        super().__init__(timeout=60)
+        self.add_item(UndoAchievedSelect(achievements, cog, member, orig_interaction))
+
+
+# ─── Undo request (regular members) ───────────────────────────────────────────
+
+class RequestUndoSelect(discord.ui.Select):
+    def __init__(self, achievements: list[dict], cog: "AgendaAchievementsPanel",
+                 member: discord.Member, orig_interaction: discord.Interaction):
+        self.cog = cog
+        self.member = member
+        self.orig_interaction = orig_interaction
+        self.all_items = _sort_by_division(achievements)[:25]
+        options, max_vals = _ach_options(self.all_items)
+        super().__init__(
+            placeholder="Select achievements to request moving back…",
+            options=options, min_values=0, max_values=max_vals,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if "__none__" in self.values:
+            await _temp_response(interaction, "No achievements available.")
+            return
+        await interaction.response.defer(ephemeral=True)
+
+        handler = self.cog.bot.get_cog("RequestHandler")
+        if not handler:
+            await _temp_followup(interaction, "Request system unavailable.")
+            return
+
+        selected = {int(v) for v in self.values}
+        chosen = [a for i, a in enumerate(self.all_items) if i in selected]
+        if not chosen:
+            try:
+                await self.orig_interaction.delete_original_response()
+            except Exception:
+                pass
+            await _temp_followup(interaction, "No changes made.")
+            return
+
+        by_division: dict[str, list[dict]] = {}
+        for a in chosen:
+            by_division.setdefault(a.get("division", "general").lower(), []).append(a)
+
+        submitted = 0
+        any_lead_found = False
+        for division, achs in by_division.items():
+            lead = await find_division_lead(self.member.guild, division)
+            if lead:
+                any_lead_found = True
+            for a in achs:
+                payload = {"ach_id": a["id"], "achievement_name": a["achievement"]}
+                request_id = create_request(
+                    division, "achievement_undo", payload,
+                    self.member.id, self.member.display_name,
+                )
+                req = {
+                    "id": request_id, "division": division,
+                    "action": "achievement_undo", "payload": payload,
+                    "requester_name": self.member.display_name,
+                    "requester_id": self.member.id, "status": "pending",
+                }
+                if lead:
+                    await handler.send_request_dm(self.member.guild, lead, req)
+                await handler.notify_requester_pending(self.member, req)
+                submitted += 1
+
+        try:
+            await self.orig_interaction.delete_original_response()
+        except Exception:
+            pass
+        label = f"{submitted} request(s)" if submitted > 1 else "Request"
+        if any_lead_found:
+            await _temp_followup(interaction, f"{label} submitted to division lead(s) — check your DMs for status.")
+        else:
+            await _temp_followup(interaction, f"{label} saved, but no division lead found. Ask a captain to follow up.")
+
+
+class RequestUndoView(discord.ui.View):
+    def __init__(self, achievements: list[dict], cog: "AgendaAchievementsPanel",
+                 member: discord.Member, orig_interaction: discord.Interaction):
+        super().__init__(timeout=60)
+        self.add_item(RequestUndoSelect(achievements, cog, member, orig_interaction))
 
 
 # ─── Division picker (select → opens modal) ───────────────────────────────────
@@ -474,7 +584,7 @@ class AgendaAchievementsView(discord.ui.View):
 
         if is_unrestricted(member):
             await interaction.response.send_message(
-                "Check tasks to mark done — pre-checked tasks are already done (deselect to undo):",
+                "Select tasks to move to Achievements:",
                 view=MarkAchievedView(all_tasks, self.cog, member, interaction),
                 ephemeral=True,
             )
@@ -485,7 +595,7 @@ class AgendaAchievementsView(discord.ui.View):
                 return
             tasks = [t for t in all_tasks if t.get("division", "").lower() in divs]
             await interaction.response.send_message(
-                "Check tasks to mark done — pre-checked tasks are already done (deselect to undo):",
+                "Select tasks to move to Achievements:",
                 view=MarkAchievedView(tasks, self.cog, member, interaction),
                 ephemeral=True,
             )
@@ -496,8 +606,42 @@ class AgendaAchievementsView(discord.ui.View):
                 return
             tasks = [t for t in all_tasks if t.get("division", "").lower() in divs]
             await interaction.response.send_message(
-                "Check tasks to request done — pre-checked tasks are already done (deselect to request undo):",
+                "Select tasks to request moving to Achievements:",
                 view=RequestAchievedView(tasks, self.cog, member, interaction),
+                ephemeral=True,
+            )
+
+    @discord.ui.button(label="Undo", style=discord.ButtonStyle.danger, emoji="↩️", row=1)
+    async def undo_achieved(self, interaction: discord.Interaction, button: discord.ui.Button):
+        member = interaction.user
+        all_ach = get_achievements()
+
+        if is_unrestricted(member):
+            await interaction.response.send_message(
+                "Select achievements to move back to the Agenda:",
+                view=UndoAchievedView(all_ach, self.cog, member, interaction),
+                ephemeral=True,
+            )
+        elif is_leader(member):
+            divs = get_lead_divisions(member)
+            if not divs:
+                await _temp_response(interaction, "You don't have a division role set.")
+                return
+            achs = [a for a in all_ach if a.get("division", "").lower() in divs]
+            await interaction.response.send_message(
+                "Select achievements to move back to the Agenda:",
+                view=UndoAchievedView(achs, self.cog, member, interaction),
+                ephemeral=True,
+            )
+        else:
+            divs = get_member_divisions(member)
+            if not divs:
+                await _temp_response(interaction, "You don't have a division role set. Ask a captain to assign you one.")
+                return
+            achs = [a for a in all_ach if a.get("division", "").lower() in divs]
+            await interaction.response.send_message(
+                "Select achievements to request moving back to the Agenda:",
+                view=RequestUndoView(achs, self.cog, member, interaction),
                 ephemeral=True,
             )
 
@@ -507,9 +651,7 @@ class AgendaAchievementsView(discord.ui.View):
 class AgendaAchievementsPanel(commands.Cog, name="AgendaAchievementsPanel"):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.channel_id = AGENDA_ACHIEVEMENTS_CHANNEL_ID
         self.message_id = self._load_id()
-        self.auto_move_loop.start()
         self.panel_refresh_loop.start()
 
     def _load_id(self) -> int | None:
@@ -525,16 +667,23 @@ class AgendaAchievementsPanel(commands.Cog, name="AgendaAchievementsPanel"):
             f.write(str(msg_id))
 
     async def refresh_panel(self, viewer: discord.Member | None = None):
-        channel = self.bot.get_channel(self.channel_id)
+        channel_id = channels.get_channel_id("agenda")
+        channel = self.bot.get_channel(channel_id)
         if not channel:
-            print(f"[AgendaAchievements] Channel {self.channel_id} not found.")
+            print(f"[AgendaAchievements] Channel {channel_id} not found.")
             return
         if viewer is None:
             viewer = channel.guild.me
 
+        # Age out achievements that fell outside the 2-meeting window.
+        meetings = recent_past_meetings()
+        m_last = meetings[0] if meetings else None
+        if len(meetings) >= 2:
+            prune_achievements_before(meetings[1])
+
         agenda       = get_agenda_tasks()
         achievements = get_achievements()
-        embed        = build_embed(agenda, achievements)
+        embed        = build_embed(agenda, achievements, m_last)
         view         = AgendaAchievementsView(agenda, self, viewer)
 
         if self.message_id:
@@ -548,28 +697,17 @@ class AgendaAchievementsPanel(commands.Cog, name="AgendaAchievementsPanel"):
         msg = await channel.send(embed=embed, view=view)
         self._save_id(msg.id)
 
-    # ── Per-minute panel refresh ───────────────────────────────────────────────
+    # ── Auto refresh: pull sheet edits, then redraw the panel ──────────────────
 
     @tasks.loop(minutes=1)
     async def panel_refresh_loop(self):
+        # Pull any manual spreadsheet edits (e.g. a row deleted by hand) back
+        # into memory before redrawing, so they show up in the panel.
+        await store_resync()
         await self.refresh_panel()
 
     @panel_refresh_loop.before_loop
     async def before_panel_refresh(self):
-        await self.bot.wait_until_ready()
-
-    # ── Hourly loop: move done tasks + expire old achievements ─────────────────
-
-    @tasks.loop(hours=1)
-    async def auto_move_loop(self):
-        moved   = move_done_tasks_to_achievements(DONE_TO_ACHIEVEMENT_HOURS)
-        expired = expire_old_achievements(ACHIEVEMENT_DISPLAY_HOURS)
-        if moved or expired:
-            print(f"[AgendaAchievements] Moved {moved} task(s), expired {expired} achievement(s).")
-        await self.refresh_panel()
-
-    @auto_move_loop.before_loop
-    async def before_auto_move(self):
         await self.bot.wait_until_ready()
 
     # ── Request helper ────────────────────────────────────────────────────────

@@ -17,9 +17,10 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 COGS = [
     "cogs.request_handler",        # load first — other cogs reference it
     "cogs.agenda_achievements",    # unified agenda + achievements
-    # Temporarily disabled — only Agenda + Achievements is live for now.
+    "cogs.signups",                # auto polls + manual meetings
+    "cogs.channel_admin",          # /set_channel
+    # Calendar stays disabled for now.
     # "cogs.calendar_panel",
-    # "cogs.signups",
 ]
 
 # @bot.event

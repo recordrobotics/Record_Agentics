@@ -22,9 +22,13 @@ How it works
    between two ticks cost one API call, not ten. The blocking write runs in a
    worker thread (`asyncio.to_thread`) so it never freezes the event loop.
 
-Trade-off: between flushes the bot is the source of truth, and manual edits made
-directly in the spreadsheet are not re-read after boot (a flush would overwrite
-them). The bot writes, humans read.
+5. `resync()` periodically pulls the sheet back into memory (push-then-read)
+   so manual edits made directly in the spreadsheet — like deleting a row — show
+   up in the bot. It skips the pull while a local write is pending and aborts on
+   a read error, so it never clobbers an in-flight write or wipes data on a blip.
+
+Trade-off: if you edit the sheet at the same instant the bot is writing, the bot
+wins that round; your edit is picked up on the next quiet resync.
 """
 
 import asyncio
@@ -39,9 +43,10 @@ from utils import sheets
 # of these columns missing from it are appended so audit data is never dropped.
 CANONICAL_HEADERS: dict[str, list[str]] = {
     "Agenda":       ["id", "task", "done", "division", "done_at", "editor", "approver"],
-    "Achievements": ["achievement", "division", "achieved_at", "editor", "approver"],
+    "Achievements": ["id", "achievement", "division", "achieved_at", "editor", "approver"],
     "Requests":     ["id", "division", "action", "payload",
                      "requester_id", "requester_name", "status", "timestamp"],
+    "Meetings":     ["id", "datetime", "label", "type"],
 }
 
 # ─── In-memory state ────────────────────────────────────────────────────────────
@@ -49,6 +54,7 @@ _tables: dict[str, list[dict]] = {tab: [] for tab in CANONICAL_HEADERS}
 _headers: dict[str, list[str]] = {}
 _row_counts: dict[str, int] = {}   # rows last written to each tab (for flush padding)
 _dirty: set[str] = set()           # tabs awaiting a flush — this is the write queue
+_clean: dict[str, str] = {}        # tab → signature of content last synced with the sheet
 
 _loaded = False
 _flusher_task: asyncio.Task | None = None
@@ -69,35 +75,102 @@ def _mark_dirty(tab: str) -> None:
 
 # ─── Hydrate / lifecycle ────────────────────────────────────────────────────────
 
-async def hydrate() -> None:
-    """Load every tab into memory. Call once at boot before serving any panel."""
-    global _loaded
+async def _load_tables() -> tuple[dict, dict, dict, set]:
+    """Read every tab from Sheets into fresh dicts. Raises if any read fails
+    (so a transient error is never mistaken for an empty sheet)."""
+    tables: dict[str, list[dict]] = {}
+    headers: dict[str, list[str]] = {}
+    counts: dict[str, int] = {}
+    backfill: set[str] = set()
+
     for tab, canonical in CANONICAL_HEADERS.items():
         header, records = await asyncio.to_thread(sheets.read_table, tab)
         if not header:
             header = list(canonical)
         else:
             header = header + [c for c in canonical if c not in header]
-        _headers[tab] = header
+        headers[tab] = header
 
         normalized = []
-        backfilled = 0
         for rec in records:
             row = dict(rec)
             if tab == "Requests":
                 row["payload"] = _parse_payload(row.get("payload"))
-            if tab == "Agenda" and not str(row.get("id", "")).strip():
-                # Old rows (or sheets created before the id column) get a stable
-                # id now so duplicate task names can be told apart.
+            if tab in ("Agenda", "Achievements") and not str(row.get("id", "")).strip():
+                # Rows added/edited by hand (or sheets predating the id column)
+                # get a stable id so duplicate names can be told apart.
                 row["id"] = _new_id()
-                backfilled += 1
+                backfill.add(tab)
             normalized.append(row)
-        _tables[tab] = normalized
-        _row_counts[tab] = len(records)
-        if backfilled:
-            _mark_dirty(tab)  # persist the new ids on the next flush
-        print(f"[Store] Hydrated {tab}: {len(records)} row(s).")
+        tables[tab] = normalized
+        counts[tab] = len(records)
+    return tables, headers, counts, backfill
+
+
+def _apply_tables(tables: dict, headers: dict, counts: dict, backfill: set) -> None:
+    _tables.clear(); _tables.update(tables)
+    _headers.clear(); _headers.update(headers)
+    _row_counts.clear(); _row_counts.update(counts)
+    # Record what the sheet currently holds. A tab is only ever re-written when
+    # in-memory content diverges from this signature — so a redundant flush can't
+    # clobber an edit made directly in the spreadsheet.
+    _dirty.clear()
+    for tab in CANONICAL_HEADERS:
+        if tab in backfill:
+            _clean[tab] = "__force_write__"  # memory has new ids the sheet lacks
+            _mark_dirty(tab)
+        else:
+            _clean[tab] = _sig(_serialize_tab(tab))
+    _migrate_legacy_done_tasks()
+
+
+async def hydrate() -> None:
+    """Load every tab into memory. Call once at boot before serving any panel."""
+    global _loaded
+    try:
+        tables, headers, counts, backfill = await _load_tables()
+        _apply_tables(tables, headers, counts, backfill)
+        for tab in CANONICAL_HEADERS:
+            print(f"[Store] Hydrated {tab}: {len(_tables[tab])} row(s).")
+    except Exception as e:
+        # Don't crash boot if Sheets is briefly unreachable; start empty. We do
+        # NOT mark anything dirty, so the flusher won't overwrite the real sheet.
+        print(f"[Store] Hydrate failed ({e}); starting with empty data.")
     _loaded = True
+
+
+async def resync() -> bool:
+    """Pull the latest sheet contents back into memory so manual edits made
+    directly in the spreadsheet (e.g. deleting a row) show up in the bot.
+
+    Safe ordering: push local writes first, then read. Skips the read if a
+    local change is pending (so we never clobber an in-flight write) and aborts
+    on any read error (so a network blip never wipes good in-memory data).
+    Returns True if memory was refreshed from the sheet."""
+    await flush_now()
+    if _dirty:
+        return False  # a write got queued during the flush — refresh later
+    try:
+        tables, headers, counts, backfill = await _load_tables()
+    except Exception as e:
+        print(f"[Store] Resync read failed ({e}); keeping current data.")
+        return False
+    if _dirty:
+        return False  # a local write happened while reading — prefer local
+    _apply_tables(tables, headers, counts, backfill)
+    return True
+
+
+def _migrate_legacy_done_tasks() -> None:
+    """Old data model kept done tasks in Agenda until a timer moved them. Now a
+    completed task moves to Achievements immediately, so sweep any leftover
+    done==TRUE agenda rows into Achievements on boot."""
+    legacy = [r for r in _tables["Agenda"] if str(r.get("done", "FALSE")).upper() == "TRUE"]
+    for row in legacy:
+        complete_task(row.get("id"),
+                      editor=row.get("editor", ""), approver=row.get("approver", ""))
+    if legacy:
+        print(f"[Store] Migrated {len(legacy)} already-done task(s) to Achievements.")
 
 
 def start_flusher() -> None:
@@ -123,13 +196,19 @@ async def flush_now() -> None:
     for tab in tabs:
         header = _headers[tab]
         # Snapshot synchronously (no await) so the rows are internally consistent.
-        rows = [_serialize_row(tab, row, header) for row in _tables[tab]]
+        rows = _serialize_tab(tab)
+        sig = _sig(rows)
+        # Skip if memory already matches what's on the sheet — never overwrite a
+        # tab we have no real change for (this is what protects manual edits).
+        if sig == _clean.get(tab):
+            continue
         prev = _row_counts.get(tab, 0)
         try:
             written = await asyncio.to_thread(
                 sheets.overwrite_table, tab, header, rows, prev
             )
             _row_counts[tab] = written
+            _clean[tab] = sig
         except Exception as e:
             print(f"[Store] Flush of '{tab}' failed, will retry: {e}")
             _dirty.add(tab)  # re-queue for the next tick
@@ -152,6 +231,15 @@ def _serialize_row(tab: str, row: dict, header: list[str]) -> list:
             val = json.dumps(val)
         out.append("" if val is None else str(val))
     return out
+
+
+def _serialize_tab(tab: str) -> list[list]:
+    header = _headers[tab]
+    return [_serialize_row(tab, row, header) for row in _tables[tab]]
+
+
+def _sig(rows: list[list]) -> str:
+    return json.dumps(rows, sort_keys=True)
 
 
 def _parse_payload(raw) -> dict:
@@ -193,20 +281,6 @@ def resolve_task_id(task_name: str, division: str) -> str | None:
     return None
 
 
-def toggle_agenda_task(task_id: str, done: bool,
-                       editor: str = "", approver: str = "") -> None:
-    done_at = _now_iso() if done else ""
-    for row in _tables["Agenda"]:
-        if row.get("id") == task_id:
-            row["done"] = "TRUE" if done else "FALSE"
-            row["done_at"] = done_at
-            if editor:
-                row["editor"] = editor
-            row["approver"] = approver
-            _mark_dirty("Agenda")
-            return
-
-
 def delete_agenda_task(task_id: str) -> None:
     before = len(_tables["Agenda"])
     _tables["Agenda"] = [r for r in _tables["Agenda"] if r.get("id") != task_id]
@@ -214,36 +288,18 @@ def delete_agenda_task(task_id: str) -> None:
         _mark_dirty("Agenda")
 
 
-def get_tasks_ready_to_move(hours: int) -> list[dict]:
-    """Done tasks that have been done for at least `hours`."""
-    ready = []
-    now = datetime.now(timezone.utc)
-    for r in _tables["Agenda"]:
-        if str(r.get("done", "FALSE")).upper() != "TRUE":
-            continue
-        done_at_str = str(r.get("done_at", "")).strip()
-        if not done_at_str:
-            continue
-        try:
-            if (now - datetime.fromisoformat(done_at_str)).total_seconds() / 3600 >= hours:
-                ready.append(r)
-        except ValueError:
-            continue
-    return ready
-
-
-def move_done_tasks_to_achievements(hours: int) -> int:
-    """Move long-done agenda tasks into Achievements. Returns count moved."""
-    ready = get_tasks_ready_to_move(hours)
-    for task in ready:
-        add_achievement(
-            task.get("task", ""),
-            task.get("division", "general"),
-            editor=task.get("editor", ""),
-            approver=task.get("approver", ""),
-        )
-        delete_agenda_task(task.get("id"))
-    return len(ready)
+def complete_task(task_id: str, editor: str = "", approver: str = "") -> bool:
+    """Move an agenda task straight to Achievements. Returns True if it existed."""
+    for row in _tables["Agenda"]:
+        if row.get("id") == task_id:
+            add_achievement(
+                row.get("task", ""), row.get("division", "general"),
+                editor=editor or row.get("editor", ""),
+                approver=approver or row.get("approver", ""),
+            )
+            delete_agenda_task(task_id)
+            return True
+    return False
 
 
 # ─── Achievements ────────────────────────────────────────────────────────────────
@@ -255,23 +311,50 @@ def get_achievements(division: str | None = None) -> list[dict]:
     return rows
 
 
-def add_achievement(text: str, division: str, editor: str = "", approver: str = "") -> None:
+def add_achievement(text: str, division: str, editor: str = "", approver: str = "") -> str:
+    ach_id = _new_id()
     _tables["Achievements"].append({
-        "achievement": text, "division": division,
+        "id": ach_id, "achievement": text, "division": division,
         "achieved_at": _now_iso(), "editor": editor, "approver": approver,
     })
     _mark_dirty("Achievements")
+    return ach_id
 
 
-def expire_old_achievements(hours: int) -> int:
-    """Drop achievements older than `hours`. Returns count removed."""
-    now = datetime.now(timezone.utc)
+def resolve_achievement_id(name: str, division: str) -> str | None:
+    """First achievement id matching name + division (fallback for legacy requests)."""
+    for row in _tables["Achievements"]:
+        if row.get("achievement") == name and row.get("division", "").lower() == division.lower():
+            return row.get("id")
+    return None
+
+
+def uncomplete_achievement(ach_id: str, editor: str = "", approver: str = "") -> bool:
+    """Move an achievement back to the Agenda (the 'oops, undo' action).
+    Returns True if it existed."""
+    for row in _tables["Achievements"]:
+        if row.get("id") == ach_id:
+            add_agenda_task(
+                row.get("achievement", ""), row.get("division", "general"),
+                editor=editor or row.get("editor", ""),
+                approver=approver or row.get("approver", ""),
+            )
+            _tables["Achievements"] = [r for r in _tables["Achievements"] if r.get("id") != ach_id]
+            _mark_dirty("Achievements")
+            return True
+    return False
+
+
+def prune_achievements_before(cutoff: datetime) -> int:
+    """Drop achievements completed before `cutoff` (a tz-aware datetime).
+    Used to age out achievements once they fall outside the meeting window.
+    Returns count removed."""
     kept, removed = [], 0
     for r in _tables["Achievements"]:
         ts = str(r.get("achieved_at", "")).strip()
         if ts:
             try:
-                if (now - datetime.fromisoformat(ts)).total_seconds() / 3600 >= hours:
+                if datetime.fromisoformat(ts) < cutoff:
                     removed += 1
                     continue
             except ValueError:
@@ -317,3 +400,20 @@ def update_request_status(request_id: str, status: str) -> None:
             r["status"] = status
             _mark_dirty("Requests")
             return
+
+
+# ─── Meetings ────────────────────────────────────────────────────────────────────
+# Only manually-added meetings are stored here; regular meetings are derived
+# deterministically from the schedule in utils.meetings.
+
+def add_meeting(dt_iso: str, label: str, mtype: str = "manual") -> str:
+    meeting_id = _new_id()
+    _tables["Meetings"].append({
+        "id": meeting_id, "datetime": dt_iso, "label": label, "type": mtype,
+    })
+    _mark_dirty("Meetings")
+    return meeting_id
+
+
+def get_meetings() -> list[dict]:
+    return [dict(r) for r in _tables["Meetings"]]

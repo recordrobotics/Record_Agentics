@@ -26,6 +26,14 @@ UNRESTRICTED_ROLE_IDS: list[int] = [
 LEADER_ROLE_ID = int(os.getenv("LEADER_ROLE_ID", 0))
 
 # ─────────────────────────────────────────────
+#  STUDENTS ROLE
+#  The role pinged by meeting announcements and
+#  the "polls are up" reminder. Create an @Students
+#  role in Discord and paste its ID here.
+# ─────────────────────────────────────────────
+STUDENTS_ROLE_ID = int(os.getenv("STUDENTS_ROLE_ID", 0))
+
+# ─────────────────────────────────────────────
 #  DIVISIONS
 #  Each division only needs one role ID now.
 #  role_id → the Discord role shared by everyone
@@ -64,14 +72,26 @@ DIVISIONS: dict[str, dict] = {
 }
 
 # ─────────────────────────────────────────────
-#  AGENDA → ACHIEVEMENT AUTO-MOVE
-#  How many hours after a task is checked done
-#  before it automatically moves to Achievements.
-#  Change this to any number you want.
-#  Examples: 24 = one day, 48 = two days
+#  ACHIEVEMENT WINDOW (meeting-based)
+#  A completed task moves to Achievements instantly.
+#  It stays visible for this many *meetings*, then
+#  disappears. 2 = keep the last meeting and the
+#  meeting before it; an achievement vanishes once
+#  the 2nd meeting after it was completed starts.
+#  Both regular (poll) meetings and manually-added
+#  meetings count.
 # ─────────────────────────────────────────────
-DONE_TO_ACHIEVEMENT_HOURS = 24   # hours a task stays crossed-off in Agenda before moving to Achievements
-ACHIEVEMENT_DISPLAY_HOURS = 24   # hours an achievement stays visible before being removed entirely
+ACHIEVEMENT_MEETING_WINDOW = 2
+
+# ─────────────────────────────────────────────
+#  TIMEZONE
+#  Used to turn meeting day/time (which are local
+#  team time) into real moments so they can be
+#  compared against achievement timestamps (UTC).
+#  Any IANA name works, e.g. "America/New_York",
+#  "America/Chicago", "America/Los_Angeles".
+# ─────────────────────────────────────────────
+TIMEZONE = os.getenv("TIMEZONE", "America/New_York")
 
 # ─────────────────────────────────────────────
 #  SHEETS WRITE-BEHIND SYNC
@@ -94,7 +114,7 @@ SIGNUPS_CHANNEL_ID         = int(os.getenv("SIGNUPS_CHANNEL_ID",         0))
 # ─────────────────────────────────────────────
 #  SIGNUP SCHEDULE
 # ─────────────────────────────────────────────
-SIGNUP_WEEKDAY = 0    # 0 = Monday … 6 = Sunday  (day the poll is auto-posted)
+SIGNUP_WEEKDAY = 5    # 0 = Monday … 6 = Sunday  (day the poll is auto-posted)
 SIGNUP_HOUR    = 9    # 24-hour format
 
 # Each entry is one poll option. weekday: 0=Mon … 6=Sun. time: display string.
