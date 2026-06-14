@@ -55,6 +55,22 @@ def get_worksheet(tab_name: str):
     return ws
 
 
+def ensure_worksheets(specs: dict[str, list[str]]) -> None:
+    """Create any missing tabs (with their header row) up front, so a brand-new
+    tab like Meetings exists immediately instead of only on first write. Raises
+    if the spreadsheet can't be opened or a tab can't be created (e.g. the
+    service account only has view access) so the failure is visible, not silent."""
+    ss = _get_spreadsheet()
+    existing = {ws.title for ws in ss.worksheets()}
+    for tab, header in specs.items():
+        if tab in existing:
+            continue
+        ws = ss.add_worksheet(title=tab, rows=100, cols=max(26, len(header)))
+        ws.update("A1", [header], value_input_option="RAW")
+        _worksheets[tab] = ws
+        print(f"[Sheets] Created missing tab '{tab}' with headers.")
+
+
 def get_or_create_worksheet(tab_name: str, cols: int = 26):
     """Like get_worksheet, but creates the tab if it doesn't exist yet — so a
     newly-introduced tab (e.g. Meetings) doesn't make writes fail forever."""

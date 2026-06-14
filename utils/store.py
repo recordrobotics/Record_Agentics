@@ -128,6 +128,13 @@ async def hydrate() -> None:
     """Load every tab into memory. Call once at boot before serving any panel."""
     global _loaded
     try:
+        # Make sure every expected tab exists (creates Meetings etc. on first run).
+        try:
+            await asyncio.to_thread(sheets.ensure_worksheets, CANONICAL_HEADERS)
+        except Exception as e:
+            print(f"[Store] Could not ensure tabs exist ({e}). If this is a "
+                  f"permission error, give the service account Editor access to "
+                  f"the spreadsheet, or add the 'Meetings' tab manually.")
         tables, headers, counts, backfill = await _load_tables()
         _apply_tables(tables, headers, counts, backfill)
         for tab in CANONICAL_HEADERS:
