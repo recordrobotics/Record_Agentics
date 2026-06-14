@@ -763,16 +763,18 @@ class AgendaAchievementsPanel(commands.Cog, name="AgendaAchievementsPanel"):
     async def setup_panel(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
 
-        # Target the configured Agenda channel; if it isn't set or I can't see
-        # it, fall back to the channel this command was run in and remember it.
         channel_id = channels.get_channel_id("agenda")
         channel = self.bot.get_channel(channel_id) if channel_id else None
         if channel is None:
-            channel = interaction.channel
-            channels.set_channel("agenda", channel.id)
+            await _temp_followup(
+                interaction,
+                f"I can't find the Agenda channel (id `{channel_id}`). Run `/set_channel` "
+                f"in the channel you want this panel in, and make sure I can see it.",
+            )
+            return
 
         # Check my actual permissions IN that channel (channel overrides beat the
-        # server-wide grant you set by reinviting) and report exactly what's missing.
+        # server-wide grant) and report exactly what's missing.
         me = channel.guild.me
         perms = channel.permissions_for(me)
         needed = {
