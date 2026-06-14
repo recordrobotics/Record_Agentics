@@ -763,13 +763,32 @@ class AgendaAchievementsPanel(commands.Cog, name="AgendaAchievementsPanel"):
     async def setup_panel(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
 
+        # Target the configured Agenda channel; if it isn't set or I can't see
+        # it, fall back to the channel this command was run in and remember it.
         channel_id = channels.get_channel_id("agenda")
-        channel = self.bot.get_channel(channel_id)
-        if not channel:
+        channel = self.bot.get_channel(channel_id) if channel_id else None
+        if channel is None:
+            channel = interaction.channel
+            channels.set_channel("agenda", channel.id)
+
+        # Check my actual permissions IN that channel (channel overrides beat the
+        # server-wide grant you set by reinviting) and report exactly what's missing.
+        me = channel.guild.me
+        perms = channel.permissions_for(me)
+        needed = {
+            "View Channel": perms.view_channel,
+            "Send Messages": perms.send_messages,
+            "Embed Links": perms.embed_links,
+            "Read Message History": perms.read_message_history,
+        }
+        missing = [name for name, ok in needed.items() if not ok]
+        if missing:
             await _temp_followup(
                 interaction,
-                f"I can't find the Agenda channel (id `{channel_id}`). Run `/set_channel` "
-                f"in the channel you want this panel in, and make sure I can see it.",
+                f"I'm missing **{', '.join(missing)}** in {channel.mention}.\n"
+                f"Open that channel → Edit Channel → Permissions, add my role, and allow "
+                f"those — channel permissions override the server-wide ones. Then run "
+                f"`/setup_panel` again.",
             )
             return
 
@@ -779,10 +798,8 @@ class AgendaAchievementsPanel(commands.Cog, name="AgendaAchievementsPanel"):
         except discord.Forbidden:
             await _temp_followup(
                 interaction,
-                f"I don't have permission to post in {channel.mention}. Give my role "
-                f"**View Channel**, **Send Messages**, **Embed Links**, and **Read Message "
-                f"History** in that channel (check the channel's permission overrides), "
-                f"then run `/setup_panel` again.",
+                f"Discord refused the post in {channel.mention} (Missing Access). "
+                f"Double-check my channel permission overrides there, then retry.",
             )
         except Exception as e:
             await _temp_followup(interaction, f"Error: {e}")
