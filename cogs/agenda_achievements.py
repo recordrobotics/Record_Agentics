@@ -129,6 +129,9 @@ def build_embed(agenda: list[dict], achievements: list[dict],
             lines.append("### Previous meeting")
             lines.extend(_group_by_division(previous, "achievement", "🏆"))
 
+    lines.append("")
+    lines.append("-# 💡 Separate entries with `|` to add several tasks at once.")
+
     description = "\n".join(lines)
     if len(description) > 4096:
         description = description[:4090] + "\n…"
