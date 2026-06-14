@@ -703,8 +703,14 @@ class AgendaAchievementsPanel(commands.Cog, name="AgendaAchievementsPanel"):
     async def panel_refresh_loop(self):
         # Pull any manual spreadsheet edits (e.g. a row deleted by hand) back
         # into memory before redrawing, so they show up in the panel.
-        await store_resync()
-        await self.refresh_panel()
+        try:
+            await store_resync()
+            await self.refresh_panel()
+        except discord.Forbidden:
+            print("[AgendaAchievements] Missing permission to post in the Agenda "
+                  "channel — grant the bot View Channel / Send Messages / Embed Links.")
+        except Exception as e:
+            print(f"[AgendaAchievements] Refresh loop error: {e}")
 
     @panel_refresh_loop.before_loop
     async def before_panel_refresh(self):
@@ -756,9 +762,28 @@ class AgendaAchievementsPanel(commands.Cog, name="AgendaAchievementsPanel"):
     @captain_only()
     async def setup_panel(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
+
+        channel_id = channels.get_channel_id("agenda")
+        channel = self.bot.get_channel(channel_id)
+        if not channel:
+            await _temp_followup(
+                interaction,
+                f"I can't find the Agenda channel (id `{channel_id}`). Run `/set_channel` "
+                f"in the channel you want this panel in, and make sure I can see it.",
+            )
+            return
+
         try:
             await self.refresh_panel(interaction.user)
-            await _temp_followup(interaction, "Panel is live!")
+            await _temp_followup(interaction, f"Panel is live in {channel.mention}!")
+        except discord.Forbidden:
+            await _temp_followup(
+                interaction,
+                f"I don't have permission to post in {channel.mention}. Give my role "
+                f"**View Channel**, **Send Messages**, **Embed Links**, and **Read Message "
+                f"History** in that channel (check the channel's permission overrides), "
+                f"then run `/setup_panel` again.",
+            )
         except Exception as e:
             await _temp_followup(interaction, f"Error: {e}")
 
