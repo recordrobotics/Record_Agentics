@@ -11,10 +11,10 @@ import asyncio
 import discord
 from discord.ext import commands
 from config import DIVISIONS, RESULT_DM_DISPLAY_HOURS
-from utils.sheets import (
+from utils.store import (
     get_request, update_request_status,
     add_agenda_task, toggle_agenda_task,
-    add_achievement,
+    add_achievement, resolve_task_id,
 )
 
 
@@ -105,8 +105,14 @@ class RequestHandler(commands.Cog):
                 add_agenda_task(payload["text"], req["division"],
                                 editor=editor, approver=approver)
             elif req["action"] == "agenda_toggle":
-                toggle_agenda_task(payload["task_name"], req["division"], payload["done"],
-                                   editor=editor, approver=approver)
+                # Prefer the stable id; fall back to name lookup for legacy
+                # requests created before tasks carried ids.
+                task_id = payload.get("task_id") or resolve_task_id(
+                    payload.get("task_name", ""), req["division"]
+                )
+                if task_id:
+                    toggle_agenda_task(task_id, payload["done"],
+                                       editor=editor, approver=approver)
             elif req["action"] == "achievement_add":
                 add_achievement(payload["text"], req["division"],
                                 editor=editor, approver=approver)

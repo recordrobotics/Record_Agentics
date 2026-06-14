@@ -74,6 +74,16 @@ DONE_TO_ACHIEVEMENT_HOURS = 24   # hours a task stays crossed-off in Agenda befo
 ACHIEVEMENT_DISPLAY_HOURS = 24   # hours an achievement stays visible before being removed entirely
 
 # ─────────────────────────────────────────────
+#  SHEETS WRITE-BEHIND SYNC
+#  How often the in-memory store flushes pending
+#  changes to Google Sheets, in seconds. Writes
+#  are instant in-memory; this only controls how
+#  fast they reach the spreadsheet. Lower = less
+#  data lost on a crash; higher = fewer API calls.
+# ─────────────────────────────────────────────
+SHEETS_FLUSH_SECONDS = 8
+
+# ─────────────────────────────────────────────
 #  CHANNEL IDs
 #  Agenda and Achievements share one channel now
 # ─────────────────────────────────────────────

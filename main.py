@@ -6,6 +6,8 @@ import os
 
 load_dotenv()
 
+from utils import store
+
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
@@ -45,6 +47,16 @@ async def main():
                 print(f"Loaded {cog}")
             except Exception as e:
                 print(f"Failed to load {cog}: {e}")
-        await bot.start(os.getenv("DISCORD_TOKEN"))
+
+        # Load all sheet data into memory once, then start the write-behind loop.
+        # Panels read from memory, so this must finish before the bot serves them.
+        await store.hydrate()
+        store.start_flusher()
+
+        try:
+            await bot.start(os.getenv("DISCORD_TOKEN"))
+        finally:
+            # Best-effort flush of anything still pending on shutdown/redeploy.
+            await store.stop()
 
 asyncio.run(main())

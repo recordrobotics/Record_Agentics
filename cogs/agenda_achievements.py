@@ -23,7 +23,7 @@ from utils.permissions import (
     find_division_lead, is_unrestricted, is_leader,
     captain_only,
 )
-from utils.sheets import (
+from utils.store import (
     get_agenda_tasks, add_agenda_task,
     toggle_agenda_task, delete_agenda_task,
     get_achievements,
@@ -244,12 +244,10 @@ class MarkAchievedSelect(discord.ui.Select):
             was_done   = str(task.get("done", "FALSE")).upper() == "TRUE"
             now_marked = i in selected
             if now_marked and not was_done:
-                toggle_agenda_task(task["task"], task.get("division", "general"), True,
-                                   editor=self.member.display_name)
+                toggle_agenda_task(task["id"], True, editor=self.member.display_name)
                 changed += 1
             elif not now_marked and was_done:
-                toggle_agenda_task(task["task"], task.get("division", "general"), False,
-                                   editor=self.member.display_name)
+                toggle_agenda_task(task["id"], False, editor=self.member.display_name)
                 changed += 1
 
         if changed:
@@ -346,15 +344,15 @@ class RequestAchievedSelect(discord.ui.Select):
             if lead:
                 any_lead_found = True
             for task, new_done in changes:
+                payload = {"task_id": task["id"], "task_name": task["task"], "done": new_done}
                 request_id = create_request(
-                    division, "agenda_toggle",
-                    {"task_name": task["task"], "done": new_done},
+                    division, "agenda_toggle", payload,
                     self.member.id, self.member.display_name,
                 )
                 req = {
                     "id": request_id, "division": division,
                     "action": "agenda_toggle",
-                    "payload": {"task_name": task["task"], "done": new_done},
+                    "payload": payload,
                     "requester_name": self.member.display_name,
                     "requester_id": self.member.id, "status": "pending",
                 }
