@@ -23,22 +23,22 @@ COGS = [
     # "cogs.calendar_panel",
 ]
 
-# @bot.event
-# async def on_ready():
-#     print(f"Logged in as {bot.user} (ID: {bot.user.id})")
-#     try:
-#         synced = await bot.tree.sync()
-#         print(f"Synced {len(synced)} slash commands")
-#     except Exception as e:
-#         print(f"Command sync failed: {e}")
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user} (ID: {bot.user.id})")
     try:
-        guild = discord.Object(id=1006751650028994700)  # paste your server ID
-        bot.tree.copy_global_to(guild=guild)
-        synced = await bot.tree.sync(guild=guild)
-        print(f"Synced {len(synced)} slash commands to guild")
+        # Sync the current command set to every server the bot is in. Guild
+        # syncs are instant, so old/removed commands disappear right away.
+        for guild in bot.guilds:
+            bot.tree.copy_global_to(guild=guild)
+            synced = await bot.tree.sync(guild=guild)
+            print(f"Synced {len(synced)} commands to {guild.name} ({guild.id})")
+
+        # Wipe any GLOBAL commands left over from an earlier global sync — those
+        # linger for up to an hour and show up as duplicate/old commands.
+        bot.tree.clear_commands(guild=None)
+        await bot.tree.sync()
+        print("Cleared stale global commands.")
     except Exception as e:
         print(f"Command sync failed: {e}")
 async def main():
