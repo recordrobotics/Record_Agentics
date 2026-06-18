@@ -19,8 +19,7 @@ COGS = [
     "cogs.agenda_achievements",    # unified agenda + achievements
     "cogs.signups",                # auto polls + manual meetings
     "cogs.channel_admin",          # /set_channel
-    # Calendar stays disabled for now.
-    # "cogs.calendar_panel",
+    "cogs.calendar_panel",         # auto-refreshing calendar + /setup_calendar
 ]
 
 @bot.event
