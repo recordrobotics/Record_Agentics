@@ -662,7 +662,24 @@ class AgendaAchievementsPanel(commands.Cog, name="AgendaAchievementsPanel"):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.message_id = self._load_id()
+        self._perms_warned = False
         self.panel_refresh_loop.start()
+
+    @staticmethod
+    def _missing_channel_perms(channel) -> list[str]:
+        """Permissions the bot still needs in `channel` to post the panel.
+
+        Channel-level overrides beat the server-wide grant, so this checks the
+        effective permissions in that specific channel.
+        """
+        perms = channel.permissions_for(channel.guild.me)
+        needed = {
+            "View Channel": perms.view_channel,
+            "Send Messages": perms.send_messages,
+            "Embed Links": perms.embed_links,
+            "Read Message History": perms.read_message_history,
+        }
+        return [name for name, ok in needed.items() if not ok]
 
     def _load_id(self) -> int | None:
         try:
@@ -682,6 +699,23 @@ class AgendaAchievementsPanel(commands.Cog, name="AgendaAchievementsPanel"):
         if not channel:
             print(f"[AgendaAchievements] Channel {channel_id} not found.")
             return
+
+        # Bail out cleanly (and quietly) if the bot can't post here, instead of
+        # letting channel.send raise Forbidden every loop tick. Log only on the
+        # transition so a missing grant doesn't spam the console each minute, and
+        # announce recovery so it's clear when it resumes on its own.
+        missing = self._missing_channel_perms(channel)
+        if missing:
+            if not self._perms_warned:
+                print(f"[AgendaAchievements] Skipping panel refresh — missing "
+                      f"{', '.join(missing)} in #{channel.name}. Grant these in the "
+                      f"channel's permission overrides; I'll resume automatically.")
+                self._perms_warned = True
+            return
+        if self._perms_warned:
+            print("[AgendaAchievements] Channel permissions restored — resuming panel refresh.")
+            self._perms_warned = False
+
         if viewer is None:
             viewer = channel.guild.me
 
@@ -783,17 +817,8 @@ class AgendaAchievementsPanel(commands.Cog, name="AgendaAchievementsPanel"):
             )
             return
 
-        # Check my actual permissions IN that channel (channel overrides beat the
-        # server-wide grant) and report exactly what's missing.
-        me = channel.guild.me
-        perms = channel.permissions_for(me)
-        needed = {
-            "View Channel": perms.view_channel,
-            "Send Messages": perms.send_messages,
-            "Embed Links": perms.embed_links,
-            "Read Message History": perms.read_message_history,
-        }
-        missing = [name for name, ok in needed.items() if not ok]
+        # Report exactly what's missing before attempting to post.
+        missing = self._missing_channel_perms(channel)
         if missing:
             await _temp_followup(
                 interaction,
