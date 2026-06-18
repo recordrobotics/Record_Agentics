@@ -132,6 +132,13 @@ def build_embed(agenda: list[dict], achievements: list[dict],
     lines.append("")
     lines.append("-# 💡 Separate entries with `|` to add several tasks at once.")
 
+    lines.append("")
+    lines.append(
+        "[📊 Engineering Tracker]"
+        "(https://docs.google.com/spreadsheets/d/"
+        "1VO3N2Kdg04PEgI7eBGUcmRD6iB5VexAHGacxOVrTPwM/edit?gid=0#gid=0)"
+    )
+
     description = "\n".join(lines)
     if len(description) > 4096:
         description = description[:4090] + "\n…"

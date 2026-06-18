@@ -43,10 +43,13 @@ class CalendarPanel(commands.Cog):
             f.write(str(msg_id))
 
     def _build_embed(self) -> discord.Embed:
-        events = get_upcoming_events(max_results=15)
+        events = get_upcoming_events(max_results=50)
+        description = build_calendar_text(events)
+        if len(description) > 4096:
+            description = description[:4090] + "\n…"
         embed = discord.Embed(
             title="📆  Team Calendar",
-            description=build_calendar_text(events),
+            description=description,
             color=discord.Color.blue(),
         )
         embed.set_footer(
