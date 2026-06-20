@@ -115,7 +115,7 @@ SIGNUPS_CHANNEL_ID         = int(os.getenv("SIGNUPS_CHANNEL_ID",         0))
 #  SIGNUP SCHEDULE
 # ─────────────────────────────────────────────
 SIGNUP_WEEKDAY = 5    # 0 = Monday … 6 = Sunday  (day the poll is auto-posted)
-SIGNUP_HOUR    = 9    # 24-hour format
+SIGNUP_HOUR    = 18    # 24-hour format
 
 # Each entry is one poll option. weekday: 0=Mon … 6=Sun. time: display string.
 # The bot calculates the actual date of the next occurrence from the post date.
