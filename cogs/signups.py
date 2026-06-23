@@ -3,7 +3,9 @@ from discord.ext import commands, tasks
 from discord import app_commands
 import datetime
 import asyncio
+import json
 import random
+from zoneinfo import ZoneInfo
 
 from config import (
     SIGNUP_WEEKDAY,
@@ -11,6 +13,7 @@ from config import (
     MEETING_DAYS,
     POLL_DURATION_HOURS,
     STUDENTS_ROLE_ID,
+    TIMEZONE,
 )
 from utils import channels, store
 from utils.meetings import resolve_meeting_datetime, format_meeting_label
@@ -26,6 +29,26 @@ _MEETING_EMOJIS = ["✅", "👍", "🙌", "🤖", "🦾", "⚡", "🔧", "🛠�
 
 # Ping the @Students role without accidentally pinging @everyone.
 _PING_STUDENTS = discord.AllowedMentions(roles=True, everyone=False, users=False)
+
+# Remembers which ISO week we last auto-posted for, so a restart/redeploy after
+# the scheduled time doesn't re-post the same week's poll. Stored as "YYYY-WW".
+_STATE_FILE = "signup_state.json"
+
+
+def _load_last_week() -> str | None:
+    try:
+        with open(_STATE_FILE) as f:
+            return json.load(f).get("last_posted_week")
+    except Exception:
+        return None
+
+
+def _save_last_week(week: str) -> None:
+    try:
+        with open(_STATE_FILE, "w") as f:
+            json.dump({"last_posted_week": week}, f)
+    except Exception as e:
+        print(f"[Signups] Could not save {_STATE_FILE}: {e}")
 
 
 async def _temp_followup(interaction: discord.Interaction, content: str) -> None:
@@ -55,7 +78,7 @@ def _students_mention(guild: discord.Guild) -> str:
 class Signups(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self._last_posted_week: int | None = None
+        self._last_posted_week: str | None = _load_last_week()
         self._last_emoji: str | None = None
         self.weekly_check.start()
 
@@ -99,16 +122,23 @@ class Signups(commands.Cog):
 
     @tasks.loop(minutes=30)
     async def weekly_check(self):
-        await self.bot.wait_until_ready()
-        now = datetime.datetime.now()
-        current_week = datetime.date.today().isocalendar().week
-        if (
-            now.weekday() == SIGNUP_WEEKDAY
-            and now.hour == SIGNUP_HOUR
-            and self._last_posted_week != current_week
-        ):
+        # Interpret the schedule in the team's local timezone — on Railway the
+        # process clock is UTC, so a naive now() would never match local time.
+        now = datetime.datetime.now(ZoneInfo(TIMEZONE))
+        iso = now.isocalendar()
+        current_week = f"{iso.year}-{iso.week:02d}"
+        if self._last_posted_week == current_week:
+            return
+        # Post once we've reached the scheduled day/hour this week. Using "at or
+        # past" (not "exactly at") means a tick missed during a restart/redeploy
+        # still posts as soon as the bot is back, instead of skipping the week.
+        reached = now.weekday() > SIGNUP_WEEKDAY or (
+            now.weekday() == SIGNUP_WEEKDAY and now.hour >= SIGNUP_HOUR
+        )
+        if reached:
             await self._do_post()
             self._last_posted_week = current_week
+            _save_last_week(current_week)
 
     @weekly_check.before_loop
     async def before_check(self):
