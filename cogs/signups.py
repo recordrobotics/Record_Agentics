@@ -30,23 +30,25 @@ _MEETING_EMOJIS = ["✅", "👍", "🙌", "🤖", "🦾", "⚡", "🔧", "🛠�
 # Ping the @Students role without accidentally pinging @everyone.
 _PING_STUDENTS = discord.AllowedMentions(roles=True, everyone=False, users=False)
 
-# Remembers which ISO week we last auto-posted for, so a restart/redeploy after
-# the scheduled time doesn't re-post the same week's poll. Stored as "YYYY-WW".
+# Persisted signup state, survives restarts/redeploys:
+#   last_posted_week — ISO week ("YYYY-WW") we last auto-posted, so a restart
+#                      after the scheduled time doesn't re-post the same week.
+#   auto_enabled     — whether the weekly auto-poll is on (toggled by command).
 _STATE_FILE = "signup_state.json"
 
 
-def _load_last_week() -> str | None:
+def _load_state() -> dict:
     try:
         with open(_STATE_FILE) as f:
-            return json.load(f).get("last_posted_week")
+            return json.load(f)
     except Exception:
-        return None
+        return {}
 
 
-def _save_last_week(week: str) -> None:
+def _save_state(state: dict) -> None:
     try:
         with open(_STATE_FILE, "w") as f:
-            json.dump({"last_posted_week": week}, f)
+            json.dump(state, f)
     except Exception as e:
         print(f"[Signups] Could not save {_STATE_FILE}: {e}")
 
@@ -78,9 +80,17 @@ def _students_mention(guild: discord.Guild) -> str:
 class Signups(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self._last_posted_week: str | None = _load_last_week()
+        state = _load_state()
+        self._last_posted_week: str | None = state.get("last_posted_week")
+        self._auto_enabled: bool = state.get("auto_enabled", True)
         self._last_emoji: str | None = None
         self.weekly_check.start()
+
+    def _persist(self) -> None:
+        _save_state({
+            "last_posted_week": self._last_posted_week,
+            "auto_enabled": self._auto_enabled,
+        })
 
     def _pick_emoji(self) -> str:
         choices = [e for e in _MEETING_EMOJIS if e != self._last_emoji] or _MEETING_EMOJIS
@@ -122,6 +132,8 @@ class Signups(commands.Cog):
 
     @tasks.loop(minutes=30)
     async def weekly_check(self):
+        if not self._auto_enabled:
+            return
         # Interpret the schedule in the team's local timezone — on Railway the
         # process clock is UTC, so a naive now() would never match local time.
         now = datetime.datetime.now(ZoneInfo(TIMEZONE))
@@ -138,7 +150,7 @@ class Signups(commands.Cog):
         if reached:
             await self._do_post()
             self._last_posted_week = current_week
-            _save_last_week(current_week)
+            self._persist()
 
     @weekly_check.before_loop
     async def before_check(self):
@@ -153,6 +165,24 @@ class Signups(commands.Cog):
 
     @manual_post.error
     async def manual_post_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        if isinstance(error, app_commands.CheckFailure):
+            await interaction.response.send_message("This command is for captains and mentors only.", ephemeral=True)
+
+    @app_commands.command(
+        name="auto_signup",
+        description="Turn the weekly auto-poll on or off",
+    )
+    @app_commands.describe(enabled="True to enable the weekly auto-poll, False to disable it")
+    @captain_only()
+    async def auto_signup(self, interaction: discord.Interaction, enabled: bool):
+        await interaction.response.defer(ephemeral=True)
+        self._auto_enabled = enabled
+        self._persist()
+        state = "enabled ✅" if enabled else "disabled 🛑"
+        await _temp_followup(interaction, f"Weekly auto-poll is now **{state}**.")
+
+    @auto_signup.error
+    async def auto_signup_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
         if isinstance(error, app_commands.CheckFailure):
             await interaction.response.send_message("This command is for captains and mentors only.", ephemeral=True)
 
